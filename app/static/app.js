@@ -29,10 +29,65 @@ async function checkHealth() {
   }
 }
 
-function onSubmit(event) {
+const DOI_PREFIX = "https://doi.org/";
+
+// Minimal result list (title link + DOI). Milestone 4 replaces this with full result cards.
+function renderResults(container, body) {
+  container.replaceChildren();
+  const summary = document.createElement("p");
+  summary.className = "summary";
+  const { total_results: total, returned } = body.search;
+  summary.textContent =
+    body.status === "no_results"
+      ? "Crossref returned no records for this question."
+      : `Crossref matched ${total.toLocaleString()} records; showing its top ${returned} by relevance.`;
+  container.appendChild(summary);
+
+  const list = document.createElement("ol");
+  for (const paper of body.papers) {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.textContent = paper.title ?? "(No title in Crossref record)";
+    // Links are built server-side from the DOI; still refuse anything else.
+    if (paper.url.startsWith(DOI_PREFIX)) {
+      link.href = paper.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    }
+    const doi = document.createElement("span");
+    doi.className = "doi";
+    doi.textContent = ` doi:${paper.doi}`;
+    item.append(link, doi);
+    list.appendChild(item);
+  }
+  container.appendChild(list);
+}
+
+async function onSubmit(event) {
   event.preventDefault();
   const results = document.getElementById("results");
-  showMessage(results, "Search is not available yet.", "info");
+  const button = event.target.querySelector("button");
+  const question = document.getElementById("question").value;
+
+  button.disabled = true;
+  showMessage(results, "Searching Crossref…", "info");
+  try {
+    const res = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showMessage(results, body.error?.message ?? `Request failed (HTTP ${res.status}).`, "error");
+      return;
+    }
+    renderResults(results, body);
+  } catch (err) {
+    showMessage(results, "Could not reach the server. Please try again.", "error");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 document.addEventListener("DOMContentLoaded", () => {

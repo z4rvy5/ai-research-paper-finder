@@ -89,8 +89,31 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 .message {
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+
+.message.error {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.summary,
+.doi {
+  color: var(--muted);
+}
+
+a {
+  color: var(--accent);
+}
+
+ol li {
+  margin-bottom: 8px;
 }

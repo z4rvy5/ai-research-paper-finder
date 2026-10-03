@@ -1,0 +1,379 @@
+{
+  "query": "Find recent papers about using LLMs for software testing",
+  "headers": {
+    "x-api-pool": "polite-array",
+    "x-rate-limit-limit": "3",
+    "x-rate-limit-interval": "1s",
+    "x-concurrency-limit": "3"
+  },
+  "body": {
+    "status": "ok",
+    "message-type": "work-list",
+    "message-version": "1.0.0",
+    "message": {
+      "facets": {},
+      "total-results": 8169794,
+      "items": [
+        {
+          "publisher": "ACM",
+          "DOI": "10.1145/3691620.3695296",
+          "type": "proceedings-article",
+          "is-referenced-by-count": 9,
+          "title": [
+            "CoDefeater: Using LLMs To Find Defeaters in Assurance Cases"
+          ],
+          "author": [
+            {
+              "ORCID": "https://orcid.org/0009-0001-8859-4928",
+              "authenticated-orcid": false,
+              "given": "Usman",
+              "family": "Gohar",
+              "sequence": "first",
+              "affiliation": [
+                {
+                  "name": "Iowa State University, Ames, Iowa, USA"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            },
+            {
+              "ORCID": "https://orcid.org/0009-0006-3775-7922",
+              "authenticated-orcid": false,
+              "given": "Michael C.",
+              "family": "Hunter",
+              "sequence": "additional",
+              "affiliation": [
+                {
+                  "name": "Iowa State University, Ames, Iowa, USA"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            },
+            {
+              "ORCID": "https://orcid.org/0000-0001-5390-7982",
+              "authenticated-orcid": false,
+              "given": "Robyn R.",
+              "family": "Lutz",
+              "sequence": "additional",
+              "affiliation": [
+                {
+                  "name": "Iowa State University, Ames, Iowa, USA"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            },
+            {
+              "ORCID": "https://orcid.org/0000-0003-2443-2425",
+              "authenticated-orcid": false,
+              "given": "Myra B.",
+              "family": "Cohen",
+              "sequence": "additional",
+              "affiliation": [
+                {
+                  "name": "Iowa State University, Ames, Iowa, USA"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            }
+          ],
+          "container-title": [
+            "Proceedings of the 39th IEEE/ACM International Conference on Automated Software Engineering"
+          ],
+          "score": 26.303333,
+          "issued": {
+            "date-parts": [
+              [
+                2024,
+                10,
+                27
+              ]
+            ]
+          },
+          "URL": "https://doi.org/10.1145/3691620.3695296",
+          "published": {
+            "date-parts": [
+              [
+                2024,
+                10,
+                27
+              ]
+            ]
+          }
+        },
+        {
+          "publisher": "ACM",
+          "DOI": "10.1145/3786583.3786881",
+          "type": "proceedings-article",
+          "is-referenced-by-count": 0,
+          "title": [
+            "Find My Code Twin: Improving SNIPPET SEARCH Performance Using LLMs in Practice"
+          ],
+          "author": [
+            {
+              "ORCID": "https://orcid.org/0009-0008-4960-1540",
+              "authenticated-orcid": false,
+              "given": "Seokjun",
+              "family": "Ko",
+              "sequence": "first",
+              "affiliation": [
+                {
+                  "name": "AI Center, Samsung Electronics, Hwaseong, Republic of Korea"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            },
+            {
+              "ORCID": "https://orcid.org/0009-0004-1727-7839",
+              "authenticated-orcid": false,
+              "given": "Eunbi",
+              "family": "Jang",
+              "sequence": "additional",
+              "affiliation": [
+                {
+                  "name": "AI Center, Samsung Electronics, Hwaseong, Republic of Korea"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            },
+            {
+              "ORCID": "https://orcid.org/0009-0008-4113-6170",
+              "authenticated-orcid": false,
+              "given": "Dahyeon",
+              "family": "Choi",
+              "sequence": "additional",
+              "affiliation": [
+                {
+                  "name": "AI Center, Samsung Electronics, Hwaseong, Republic of Korea"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            },
+            {
+              "ORCID": "https://orcid.org/0009-0005-3735-4755",
+              "authenticated-orcid": false,
+              "given": "Daeha",
+              "family": "Ryu",
+              "sequence": "additional",
+              "affiliation": [
+                {
+                  "name": "AI Center, Samsung Electronics, Hwaseong, Republic of Korea"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            },
+            {
+              "ORCID": "https://orcid.org/0009-0008-7660-5520",
+              "authenticated-orcid": false,
+              "given": "Jinyoung",
+              "family": "Park",
+              "sequence": "additional",
+              "affiliation": [
+                {
+                  "name": "AI Center, Samsung Electronics, Hwaseong, Republic of Korea"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            },
+            {
+              "ORCID": "https://orcid.org/0009-0004-9622-9789",
+              "authenticated-orcid": false,
+              "given": "Chang-Seo",
+              "family": "Park",
+              "sequence": "additional",
+              "affiliation": [
+                {
+                  "name": "AI Center, Samsung Electronics, Hwaseong, Republic of Korea"
+                }
+              ],
+              "role": [
+                {
+                  "vocabulary": "crossref",
+                  "role": "author"
+                }
+              ]
+            }
+          ],
+          "container-title": [
+            "Proceedings of the IEEE/ACM 48th International Conference on Software Engineering: Software Engineering in Practice"
+          ],
+          "score": 26.182806,
+          "issued": {
+            "date-parts": [
+              [
+                2026,
+                4,
+                12
+              ]
+            ]
+          },
+          "URL": "https://doi.org/10.1145/3786583.3786881",
+          "published": {
+            "date-parts": [
+              [
+                2026,
+                4,
+                12
+              ]
+            ]
+          }
+        },
+        {
+          "publisher": "Wiley",
+          "DOI": "10.1002/stvr.244",
+          "type": "journal-article",
+          "is-referenced-by-count": 0,
+          "title": [
+            "Editorial: Find the missing links?"
+          ],
+          "author": [
+            {
+              "given": "Derek",
+              "family": "Yates",
+              "sequence": "first",
+              "affiliation": [],
+              "role": [
+                {
+                  "role": "author",
+                  "vocabulary": "crossref"
+                }
+              ]
+            }
+          ],
+          "container-title": [
+            "Software Testing, Verification and Reliability"
+          ],
+          "score": 26.034616,
+          "issued": {
+            "date-parts": [
+              [
+                2002,
+                2,
+                14
+              ]
+            ]
+          },
+          "URL": "https://doi.org/10.1002/stvr.244",
+          "published": {
+            "date-parts": [
+              [
+                2002,
+                2,
+                14
+              ]
+            ]
+          }
+        },
+        {
+          "publisher": "ScienceTech Xplore",
+          "DOI": "10.63282/3050-9246/icrtcsit-139",
+          "type": "proceedings-article",
+          "is-referenced-by-count": 0,
+          "title": [
+            "Automated QA Testing for AI-Generated Game Content: Using LLMs to Validate NPC Behavior and Narrative Integrity"
+          ],
+          "container-title": [
+            "International Conference on Recent Trends in Computer Science and Information Technology"
+          ],
+          "score": 25.650223,
+          "issued": {
+            "date-parts": [
+              [
+                2025
+              ]
+            ]
+          },
+          "URL": "https://doi.org/10.63282/3050-9246/icrtcsit-139",
+          "published": {
+            "date-parts": [
+              [
+                2025
+              ]
+            ]
+          }
+        },
+        {
+          "publisher": "ScienceTech Xplore",
+          "DOI": "10.63282/3050-9246/icrtcsit-128",
+          "type": "proceedings-article",
+          "is-referenced-by-count": 0,
+          "title": [
+            "Automated QA Testing for AI-Generated Game Content: Using LLMs to Validate NPC Behavior and Narrative Integrity"
+          ],
+          "container-title": [
+            "International Conference on Recent Trends in Computer Science and Information Technology"
+          ],
+          "score": 25.517868,
+          "issued": {
+            "date-parts": [
+              [
+                2025,
+                10,
+                31
+              ]
+            ]
+          },
+          "URL": "https://doi.org/10.63282/3050-9246/icrtcsit-128",
+          "published": {
+            "date-parts": [
+              [
+                2025,
+                10,
+                31
+              ]
+            ]
+          }
+        }
+      ],
+      "items-per-page": 5,
+      "query": {
+        "start-index": 0,
+        "search-terms": null
+      }
+    }
+  }
+}

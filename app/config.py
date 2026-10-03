@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-sonnet-5-5"
     anthropic_effort: Literal["low", "medium", "high"] = "low"
 
-    # Crossref polite pool: the contact address is sent as `mailto` and in the User-Agent.
+    # Optional Crossref polite-pool contact address. If set, it is sent in the User-Agent header
+    # only (never in URLs); if unset, no address is sent.
     crossref_mailto: str | None = None
 
     database_url: str = "sqlite:///./data/app.db"
