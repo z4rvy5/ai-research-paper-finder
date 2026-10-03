@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "paper-finder",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "uvicorn", "app.main:create_app", "--factory", "--port", "8000"],
+      "port": 8000
+    }
+  ]
+}

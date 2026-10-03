@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Research Paper Finder</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <h1>AI Research Paper Finder</h1>
+      <p class="tagline">
+        Ask a research question. Results come only from Crossref records, with the evidence
+        behind each recommendation.
+      </p>
+      <p id="server-status" class="status" role="status">Checking server…</p>
+    </header>
+
+    <main>
+      <form id="ask-form">
+        <label for="question">Research question</label>
+        <textarea
+          id="question"
+          name="question"
+          rows="3"
+          maxlength="500"
+          required
+          placeholder="Find recent papers about using LLMs for software testing"
+        ></textarea>
+        <button type="submit">Search</button>
+      </form>
+
+      <section id="results" aria-live="polite"></section>
+    </main>
+  </body>
+</html>
