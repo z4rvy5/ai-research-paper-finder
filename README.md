@@ -73,9 +73,11 @@ smoke test for a running deployment (`uv run python scripts/smoke_test.py <url>`
 | `ANTHROPIC_MODEL` | no | `claude-sonnet-5-5` | Model used for both calls. `claude-opus-5-5` is a drop-in alternative. |
 | `ANTHROPIC_EFFORT` | no | `low` | `low` / `medium` / `high`; always sent explicitly because defaults differ by model. |
 | `CROSSREF_MAILTO` | no | none | Contact address for Crossref's "polite" pool. Sent **only** in the `User-Agent` header, never in URLs; if empty, no address is sent. |
-| `DATABASE_URL` | for production | `sqlite:///./data/app.db` | Reading-list database. Use Neon's `postgresql://…?sslmode=require` string as given. |
+| `DATABASE_URL` | for production | `sqlite:///./data/app.db` | Reading-list database. Use Neon's `postgresql://…?sslmode=require` string as given. A blank value uses the default. |
 | `MAX_DAILY_MODEL_CALLS` | no | `500` | Cost cap per UTC day. After it, answers continue with fallbacks (`degraded`). `0` = never call the model. |
 | `ASK_RATE_LIMIT_PER_MINUTE` | no | `20` | Questions per client address per minute. `0` disables. |
+| `SAVE_RATE_LIMIT_PER_MINUTE` | no | `20` | Reading-list saves per client address per minute (a separate limit from questions). `0` disables. |
+| `MAX_SAVED_PER_CLIENT` | no | `200` | Most papers one `X-Client-Id` may keep saved. `0` disables. |
 
 Never commit `.env`. Production secrets are set in Render's dashboard, not in files.
 
@@ -111,7 +113,7 @@ All errors use `{"error": {"code", "message", "retryable"}}`.
 |---|---|---|---|
 | `POST /api/ask` | `{"question": "…"}` (3-500 chars) | `200` `AskResponse`: `status` (`ok`, `degraded`, `no_results`, `refused`), `papers[]`, `limitations[]`, `trace` | `422` invalid input · `429` rate limited (`Retry-After`) · `502`/`503` Crossref failure (with a `trace`) |
 | `GET /api/reading-list` | header `X-Client-Id` | `200` `{"items": [SavedPaper]}`, newest first | `400` missing/invalid client id · `503` storage unavailable |
-| `POST /api/reading-list` | header `X-Client-Id`; `{"doi": "10.…"}` only | `201` newly saved · `200` already saved | `400` · `404` `doi_not_found` · `422` · `502`/`503` |
+| `POST /api/reading-list` | header `X-Client-Id`; `{"doi": "10.…"}` only | `201` newly saved · `200` already saved | `400` · `404` `doi_not_found` · `409` `reading_list_full` · `422` · `429` rate limited (`Retry-After`) · `502`/`503` |
 | `DELETE /api/reading-list/{doi}` | header `X-Client-Id` | `204` | `400` · `404` `not_saved` · `422` · `503` |
 | `GET /api/health` | none | `200` `{"status","db","db_backend","model_configured","crossref_mailto_configured"}` | none |
 
@@ -152,7 +154,8 @@ verified locally in a clean copy; they have not yet run on Render.
 
 ### Usage limits
 
-To keep a public demo affordable: 20 questions per client address per minute, and a daily cap on
+To keep a public demo affordable: 20 questions and 20 reading-list saves per client address per
+minute (separate limits), at most 200 saved papers per `X-Client-Id`, and a daily cap on
 model calls (`MAX_DAILY_MODEL_CALLS`). After the cap, the app still answers using its deterministic
 fallbacks and marks the answer "degraded". Both limits are in memory and reset on restart.
 

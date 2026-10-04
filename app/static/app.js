@@ -105,13 +105,12 @@ async function checkHealth() {
     const res = await fetchWithTimeout("/api/health", {}, HEALTH_TIMEOUT_MS);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const health = await res.json();
-    const missing = [];
-    if (!health.model_configured) missing.push("model API key");
-    if (!health.crossref_mailto_configured) missing.push("Crossref contact email");
-    el.textContent = missing.length
-      ? `Server is up (not configured: ${missing.join(", ")}).`
-      : "Server is up.";
-    el.dataset.state = missing.length ? "warn" : "ok";
+    // The Crossref contact address is optional: public access is a normal, intended mode.
+    // A missing model key is still a real limitation (answers use the fallbacks), so it is shown.
+    const access = health.crossref_mailto_configured ? "polite" : "public";
+    const modelNote = health.model_configured ? "" : " (not configured: model API key)";
+    el.textContent = `Server is up \u00b7 Crossref ${access} access${modelNote}`;
+    el.dataset.state = health.model_configured ? "ok" : "warn";
   } catch (err) {
     el.textContent = "Server unreachable. It may be waking up; try again in a minute.";
     el.dataset.state = "error";
@@ -162,21 +161,18 @@ function renderPaper(paper, index) {
   doi.appendChild(doiLink);
   card.appendChild(doi);
 
-  const basis =
-    paper.evidence_basis === "title_and_abstract" ? "Based on title + abstract" : "Based on title only";
-  card.appendChild(h("p", "badge", basis));
-
-  const generated = paper.explanation_source === "model";
-  card.appendChild(
-    h(
-      "p",
-      "explanation-label",
-      generated
-        ? "Why it may be relevant (AI-written, from Crossref metadata only):"
-        : "Why it may be relevant (generated from metadata; no AI text was used):",
-    ),
-  );
-  card.appendChild(h("p", "explanation", paper.explanation));
+  // The evidence disclosure sits next to the explanation as one compact badge. Which text it
+  // describes (written by the model, or built from metadata with no AI) is stated truthfully.
+  const basis = paper.evidence_basis === "title_and_abstract" ? "title + abstract" : "title only";
+  const source =
+    paper.explanation_source === "model"
+      ? "AI-generated \u00b7 Crossref metadata"
+      : "Built from Crossref metadata (no AI text)";
+  const badge = h("span", "badge", `${source} \u00b7 ${basis}`);
+  badge.dataset.evidence = paper.evidence_basis;
+  const label = h("p", "explanation-label", "Why it may be relevant");
+  label.append(" ", badge);
+  card.append(label, h("p", "explanation", paper.explanation));
 
   if (paper.abstract) {
     const details = h("details", "abstract");

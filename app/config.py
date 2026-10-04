@@ -2,8 +2,10 @@
 
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_DATABASE_URL = "sqlite:///./data/app.db"
 
 
 class Settings(BaseSettings):
@@ -19,13 +21,26 @@ class Settings(BaseSettings):
     # only (never in URLs); if unset, no address is sent.
     crossref_mailto: str | None = None
 
-    database_url: str = "sqlite:///./data/app.db"
+    database_url: str = DEFAULT_DATABASE_URL
     # Cost and abuse limits for a public demo (in-memory, per process; see app/limits.py).
     # When the daily model-call cap is reached the app keeps answering with its deterministic
     # fallbacks instead of calling the model. 0 means "never call the model".
     max_daily_model_calls: int = 500
     # Questions per client address per minute; 0 disables the limit.
     ask_rate_limit_per_minute: int = 20
+    # Reading-list saves per client address per minute (its own limit, separate from asks), and
+    # the most papers one client id may keep saved. 0 disables either.
+    save_rate_limit_per_minute: int = 20
+    max_saved_per_client: int = 200
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _blank_database_url_means_the_default(cls, value: object) -> object:
+        """A blank DATABASE_URL (a copied `.env.example`, an empty dashboard value) falls back to
+        the default, as a blank model key is treated as unset."""
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_DATABASE_URL
+        return value
 
     @property
     def model_api_key(self) -> str | None:

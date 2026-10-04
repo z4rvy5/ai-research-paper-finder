@@ -167,6 +167,18 @@ one our own proxy appended, which a client cannot forge, because anything a clie
 earlier in the list (a test proves a forged prefix does not bypass the limit). If several proxies
 sit in front, clients can share an address and so share a limit, which errs on the side of limiting.
 
+**Reading-list save limit and per-client cap (`main.limit_saves`, `ReadingListRepo.count`).**
+`POST /api/reading-list` has its own sliding-window bucket (`SAVE_RATE_LIMIT_PER_MINUTE`, default
+20, `0` disables), keyed by the same `client_address` and independent of the ask limit: saves
+never use up asks and asks never use up saves. Each uncached save makes one Crossref lookup, so
+without it a client could drain Crossref's public pool, which also serves questions. Over the
+limit: `429 rate_limited` with `Retry-After`, and no Crossref call. Separately, one `X-Client-Id`
+may keep at most `MAX_SAVED_PER_CLIENT` papers (default 200, `0` disables): after the "already
+saved" check (re-saving a saved paper still returns 200) and **before** the Crossref lookup, a
+full list gets `409 reading_list_full`; removing a paper frees room. The cap is per client id, not
+per person (ids are free to make), so the per-address save limit is what bounds an abuser. The
+count-then-insert is not atomic, so simultaneous saves can overshoot the cap by a few papers.
+
 **Daily model-call cap (`app/agent/budget.py`).** Every model call spends from a per-UTC-day
 budget (`MAX_DAILY_MODEL_CALLS`, default 500). When it is gone, `BudgetedModelClient` raises
 `ModelError("model_daily_limit")` and the orchestrator's existing fallbacks take over: the
@@ -311,9 +323,11 @@ that has any of: a length outside 15-600 characters; markup; a URL, DOI, `et al.
 `results show`, `found that`, …); or a number that isn't in the title, abstract or year. A
 rejected explanation is replaced by `fallback_explanation` (built only from the query terms
 found in the paper's own metadata) and recorded in `trace.grounding.explanation_rewrites`.
-These checks are lexical: they catch common overclaims but **can miss subtle ones**, so the UI
-labels AI text as "AI-written, from Crossref metadata only" and fallback text as "no AI text
-was used".
+These checks are lexical: they catch common overclaims but **can miss subtle ones**, so every
+explanation carries one compact badge beside the "Why it may be relevant" heading: `AI-generated ·
+Crossref metadata · title + abstract` (or `… · title only`) for model text, and `Built from Crossref
+metadata (no AI text) · title + abstract` (or `… · title only`) for the deterministic fallback. The
+evidence part comes from `evidence_basis`, which code decides.
 
 Untrusted input: the question and all metadata are escaped (`prompts.escape`) before going
 inside tags, and the system prompts say to treat them as data. That *reduces* prompt-injection
@@ -370,6 +384,8 @@ risk; the output bounds above are what actually limit the damage.
 | Missing abstract / authors / year | Explicit placeholders and `missing_fields`; evidence basis "title only" | `normalize_work`, `renderPaper` |
 | Model explanation overclaims / cites / adds a paper | Replaced or ignored, recorded in `trace.grounding`; `degraded` | `ground_explanations` |
 | Crossref 429 / 5xx / timeout / connection error | Retried once (Retry-After honored, capped at 2 s); success after a retry is `ok` with `retries: 1` in the trace; a second failure is the 503 / 502 error with the failure trace | `CrossrefClient._get` |
+| More than `SAVE_RATE_LIMIT_PER_MINUTE` saves from one address | 429 `rate_limited` with `Retry-After`; no Crossref call | `limit_saves` |
+| A client id already has `MAX_SAVED_PER_CLIENT` papers | 409 `reading_list_full`; no Crossref call; saving an already-saved paper still returns 200 | `save_paper`, `ReadingListRepo.count` |
 | More than `ASK_RATE_LIMIT_PER_MINUTE` questions from one address | 429 `rate_limited` with `Retry-After`; no model or Crossref call | `limit_asks`, `SlidingWindowLimiter` |
 | Daily model-call cap reached | Answer continues using fallbacks, `degraded`, `interpret/explain: model_daily_limit` in the trace | `BudgetedModelClient` |
 | Unknown route / wrong method | 404 `not_found` / 405 `method_not_allowed` in the standard envelope | `on_http_exception` |
@@ -386,7 +402,7 @@ risk; the output bounds above are what actually limit the damage.
 ## 7. Tests
 
 ```bash
-uv run pytest                                   # all tests (420)
+uv run pytest                                   # all tests (432)
 uv run pytest tests/test_workflow.py            # the end-to-end scenarios
 uv run pytest "tests/test_grounding.py::test_overclaiming_explanation_is_replaced_by_a_deterministic_one_and_recorded"
 uv run ruff check . && uv run ruff format --check .
@@ -406,13 +422,13 @@ over `httpx2.MockTransport`; the model with `FakeModelClient`, or the real
 | `test_normalize_metadata.py` (16) | Authors (placeholders, organizations), partial dates, JATS → text, entity/DOCTYPE safety, truncation, `missing_fields` |
 | `test_prompts.py` (5) | Hostile text can't close or forge tags; the explanation call sees only title/year/venue/abstract |
 | `test_api_ask.py` (22) | HTTP contract and compatibility, 422s (no trace), Crossref error envelopes (same `error`, plus a trace), the 500 catch-all, shutdown, and the contact-address / credential privacy tests |
-| `test_reading_list_api.py` (63) | The reading-list HTTP API: save from a just-recommended paper (no second Crossref call) and by Crossref lookup; clients can't supply metadata; unknown DOI 404; duplicate save 200; DOI normalization and case; 10 invalid payloads; Crossref failures while saving; missing and injection-like metadata; newest-first list; remove 204/404, encoded and slash-containing DOIs; the `X-Client-Id` requirement on all three endpoints; separate lists per client; **persistence across an application restart** (file database, three app lifetimes); database failure → 503 with no connection details in the response or logs, while `/api/ask` keeps working; health `db` state; the exact response contract; `/api/health`'s `db_backend` and the Render ephemeral-SQLite warning |
+| `test_reading_list_api.py` (71) | The reading-list HTTP API: save from a just-recommended paper (no second Crossref call) and by Crossref lookup; clients can't supply metadata; unknown DOI 404; duplicate save 200; DOI normalization and case; 10 invalid payloads; Crossref failures while saving; missing and injection-like metadata; newest-first list; remove 204/404, encoded and slash-containing DOIs; the `X-Client-Id` requirement on all three endpoints; separate lists per client; **persistence across an application restart** (file database, three app lifetimes); database failure → 503 with no connection details in the response or logs, while `/api/ask` keeps working; health `db` state; the exact response contract; `/api/health`'s `db_backend` and the Render ephemeral-SQLite warning; a Crossref record for a different DOI is never saved; the save rate limit (429, no Crossref call, per forwarded address, independent of the ask limit, `0` disables) and the per-client cap (409, no Crossref call, re-saving still 200, removal frees room, separate per client) |
 | `test_reading_list_repo.py` (24) | The repository on SQLite: round trip with unicode, missing data stays missing, idempotent add, ordering, UTC timestamps, client separation, restart, SQL-looking text stored as data, the composite primary key and index, database-enforced uniqueness, URL mapping for Neon, and failure handling with a driver error full of secrets (never logged or returned), plus schema-creation retry |
 | `test_smoke_script.py` (8) | The deployment smoke script, offline: passes on a healthy app, fails on a missing model (`--expect-model`), SQLite (`--expect-postgres`), a broken database, secret-looking response text, an unreachable service and an empty result |
 | `test_paper_cache.py` (6) | Only Crossref fields cached, independent copies, TTL expiry, eviction order |
-| `test_security.py` (22) | Headers on every kind of response; the CSP's shape; the page has nothing a strict CSP would block; `app.js` never assigns markup or inline styles; `/docs` exemption; the 404/405 envelope; the ask rate limit (429, `Retry-After`, no work done, per-address buckets, a forged `X-Forwarded-For` prefix does not bypass it, invalid questions count, other endpoints unaffected, `0` disables it); the daily cap degrades to fallbacks and never calls the model again |
+| `test_security.py` (23) | Headers on every kind of response, including an unexpected 500; the CSP's shape; the page has nothing a strict CSP would block; `app.js` never assigns markup or inline styles; `/docs` exemption; the 404/405 envelope; the ask rate limit (429, `Retry-After`, no work done, per-address buckets, a forged `X-Forwarded-For` prefix does not bypass it, invalid questions count, other endpoints unaffected, `0` disables it); the daily cap degrades to fallbacks and never calls the model again |
 | `test_limits.py` (14) | The sliding window (limit, wait time, expiry, key independence, bounded memory), the daily budget (limit, next-day reset, zero), and the model wrapper |
-| `test_crossref_client.py` (56), `test_capture_fixtures.py` (10), `test_normalize.py` (6), `test_app.py` (7) | M1/M2 behavior, plus `get_work` (record, 404 as not found, path encoding, error mapping, malformed responses) and the retry policy (each transient status and network error retried once, `Retry-After` honored and capped, exactly one retry, no retry for 4xx, rate-limit headers captured on failure). `test_app.py`'s health test now expects `db: "ok"` (it was a placeholder until M4) |
+| `test_crossref_client.py` (56), `test_capture_fixtures.py` (10), `test_normalize.py` (6), `test_app.py` (10) | M1/M2 behavior, plus `get_work` (record, 404 as not found, path encoding, error mapping, malformed responses) and the retry policy (each transient status and network error retried once, `Retry-After` honored and capped, exactly one retry, no retry for 4xx, rate-limit headers captured on failure). `test_app.py`'s health test now expects `db: "ok"` (it was a placeholder until M4) |
 
 ## 8. Why deterministic orchestration instead of an autonomous tool-using agent?
 
@@ -460,7 +476,7 @@ deterministic refusal of obvious requests to invent papers.
   Retry-After pause, but no client-side pacing or per-pool limiter. At demo scale (a few
   reviewers, two Crossref calls per question) Crossref's limits are not expected to be reached;
   if they are, the user sees a clear 503 with the failure trace.
-- **The rate limit and the daily cap are in memory and per process.** They reset when the server
+- **The rate limits and the daily cap are in memory and per process.** They reset when the server
   restarts and are not shared across instances. The per-client key is the last
   `X-Forwarded-For` entry, which can group users behind a shared proxy.
 - **Failure traces are minimal.** A failed primary search reports the plan, the failing step,

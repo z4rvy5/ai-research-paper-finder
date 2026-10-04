@@ -75,6 +75,14 @@ CONTENT_SECURITY_POLICY = (
 )
 
 
+def apply_security_headers(response: Response, path: str) -> None:
+    """Add the security headers to `response` (used by the middleware and the 500 handler)."""
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if not path.startswith(("/docs", "/redoc")):
+        response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+
+
 def error_response(
     status: int,
     code: str,
@@ -135,6 +143,7 @@ def create_app(
         model or AnthropicModelClient(settings), DailyCallBudget(settings.max_daily_model_calls)
     )
     ask_limiter = SlidingWindowLimiter(settings.ask_rate_limit_per_minute, 60.0)
+    save_limiter = SlidingWindowLimiter(settings.save_rate_limit_per_minute, 60.0)  # its own bucket
     repo = repo or ReadingListRepo(make_engine(settings.database_url))
     orchestrator = Orchestrator(
         model=model, crossref=crossref, model_name=settings.anthropic_model, clock=clock
@@ -165,10 +174,7 @@ def create_app(
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):
         response = await call_next(request)
-        for name, value in SECURITY_HEADERS.items():
-            response.headers.setdefault(name, value)
-        if not request.url.path.startswith(("/docs", "/redoc")):
-            response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        apply_security_headers(response, request.url.path)
         return response
 
     async def limit_asks(request: Request) -> None:
@@ -179,6 +185,18 @@ def create_app(
                 429,
                 "rate_limited",
                 f"Too many questions in a short time. Please wait about {seconds} seconds.",
+                retryable=True,
+                headers={"Retry-After": str(seconds)},
+            )
+
+    async def limit_saves(request: Request) -> None:
+        wait = save_limiter.check(client_address(request))
+        if wait is not None:
+            seconds = max(1, math.ceil(wait))
+            raise ApiError(
+                429,
+                "rate_limited",
+                f"Too many saves in a short time. Please wait about {seconds} seconds.",
                 retryable=True,
                 headers={"Retry-After": str(seconds)},
             )
@@ -225,7 +243,13 @@ def create_app(
     @app.exception_handler(Exception)
     async def on_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         log.exception("Unhandled error while handling %s", request.url.path)
-        return error_response(500, "internal_error", "Something went wrong on the server.", False)
+        # The middleware above does not wrap this response (it is built outside it), so the
+        # security headers are added here.
+        response = error_response(
+            500, "internal_error", "Something went wrong on the server.", False
+        )
+        apply_security_headers(response, request.url.path)
+        return response
 
     @app.get("/api/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -267,7 +291,13 @@ def create_app(
         "/api/reading-list",
         response_model=SavedPaper,
         status_code=201,
-        responses={200: {"model": SavedPaper}, **READING_LIST_ERRORS},
+        dependencies=[Depends(limit_saves)],
+        responses={
+            200: {"model": SavedPaper},
+            409: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
+            **READING_LIST_ERRORS,
+        },
     )
     async def save_paper(
         body: SavePaperRequest, response: Response, client_id: str = Depends(client_id_header)
@@ -277,6 +307,15 @@ def create_app(
         if existing is not None:
             response.status_code = 200
             return existing
+
+        cap = settings.max_saved_per_client
+        if cap > 0 and await run_in_threadpool(repo.count, client_id) >= cap:
+            # Checked before any Crossref lookup, so a full list costs no upstream call.
+            raise ApiError(
+                409,
+                "reading_list_full",
+                f"Your reading list is full ({cap} papers). Remove a paper to save another.",
+            )
 
         # The metadata is always Crossref's: from a paper we just recommended, or looked up now.
         paper = recent_papers.get(body.doi)

@@ -127,6 +127,17 @@ def test_unknown_dois_are_a_404_and_nothing_is_saved():
     assert listing(client) == []
 
 
+def test_a_crossref_record_for_a_different_doi_is_never_saved():
+    # Crossref answers the lookup with a record whose DOI is not the one requested.
+    other = work(doi="10.1000/some.other.paper", title="Some other paper")
+    client = make_client(FakeCrossrefClient(works={DOI: other}))
+
+    res = save(client)
+
+    assert res.status_code == 404 and res.json()["error"]["code"] == "doi_not_found"
+    assert listing(client) == []
+
+
 def test_saving_twice_is_fine_returns_200_and_does_not_look_up_again():
     crossref = FakeCrossrefClient(works={DOI: RECORD})
     client = make_client(crossref)
@@ -501,3 +512,119 @@ def test_no_warning_with_postgres_on_render_or_with_sqlite_elsewhere(monkeypatch
             pass
 
     assert "will NOT survive a restart" not in caplog.text
+
+
+# --- Abuse limits: save rate limit and per-client cap -----------------------------------------
+
+
+def numbered_dois(count: int) -> dict[str, dict]:
+    dois = [f"10.1000/paper.{n}" for n in range(count)]
+    return {doi: work(doi=doi, title=f"Paper {n}") for n, doi in enumerate(dois)}
+
+
+def test_saves_beyond_the_per_minute_limit_get_a_429_and_cause_no_crossref_lookup():
+    works = numbered_dois(5)
+    crossref = FakeCrossrefClient(works=works)
+    client = make_client(crossref, save_rate_limit_per_minute=3)
+
+    statuses = [save(client, doi).status_code for doi in list(works)[:3]]
+    blocked = save(client, list(works)[3])
+
+    assert statuses == [201, 201, 201] and blocked.status_code == 429
+    assert blocked.json() == {
+        "error": {
+            "code": "rate_limited",
+            "message": blocked.json()["error"]["message"],
+            "retryable": True,
+        }
+    }
+    assert 1 <= int(blocked.headers["retry-after"]) <= 60
+    assert len(crossref.get_work_calls) == 3  # the blocked request never reached Crossref
+    assert len(listing(client)) == 3  # listing is not limited
+
+
+def test_the_save_limit_is_per_forwarded_address_and_a_forged_prefix_does_not_bypass_it():
+    works = numbered_dois(4)
+    client = make_client(FakeCrossrefClient(works=works), save_rate_limit_per_minute=1)
+    first, second, third, fourth = list(works)
+
+    def save_as(doi, forwarded):
+        return client.post(
+            "/api/reading-list",
+            json={"doi": doi},
+            headers={**headers(), "X-Forwarded-For": forwarded},
+        ).status_code
+
+    assert save_as(first, "203.0.113.1") == 201
+    assert save_as(second, "10.9.8.7, 203.0.113.1") == 429  # a forged prefix changes nothing
+    assert save_as(third, "203.0.113.2") == 201  # a different address is unaffected
+
+
+def test_saves_and_asks_have_independent_rate_limits():
+    works = numbered_dois(3)
+    client = make_client(
+        FakeCrossrefClient(result=fixture_result(), works=works),
+        ask_rate_limit_per_minute=1,
+        save_rate_limit_per_minute=1,
+    )
+    question = {"question": "LLMs for software testing"}
+
+    assert client.post("/api/ask", json=question).status_code == 200
+    assert save(client, list(works)[0]).status_code == 201  # the ask did not use up the save limit
+    assert save(client, list(works)[1]).status_code == 429
+    assert client.post("/api/ask", json=question).status_code == 429  # and ask is still limited
+
+
+def test_a_save_limit_of_zero_disables_it():
+    works = numbered_dois(30)
+    client = make_client(
+        FakeCrossrefClient(works=works), save_rate_limit_per_minute=0, max_saved_per_client=0
+    )
+
+    assert all(save(client, doi).status_code == 201 for doi in works)
+
+
+def test_a_full_reading_list_rejects_new_papers_with_a_409_and_no_crossref_lookup():
+    works = numbered_dois(4)
+    crossref = FakeCrossrefClient(works=works)
+    client = make_client(crossref, max_saved_per_client=3, save_rate_limit_per_minute=0)
+    dois = list(works)
+    for doi in dois[:3]:
+        assert save(client, doi).status_code == 201
+    lookups = len(crossref.get_work_calls)
+
+    res = save(client, dois[3])
+
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "reading_list_full"
+    assert res.json()["error"]["retryable"] is False
+    assert len(crossref.get_work_calls) == lookups  # no upstream call for a full list
+    assert len(listing(client)) == 3
+
+
+def test_saving_an_already_saved_paper_still_works_when_the_list_is_full():
+    works = numbered_dois(2)
+    client = make_client(
+        FakeCrossrefClient(works=works), max_saved_per_client=2, save_rate_limit_per_minute=0
+    )
+    for doi in works:
+        save(client, doi)
+
+    again = save(client, list(works)[0])
+
+    assert again.status_code == 200 and len(listing(client)) == 2
+
+
+def test_removing_a_paper_frees_room_and_other_clients_have_their_own_cap():
+    works = numbered_dois(3)
+    client = make_client(
+        FakeCrossrefClient(works=works), max_saved_per_client=2, save_rate_limit_per_minute=0
+    )
+    first, second, third = list(works)
+    save(client, first), save(client, second)
+
+    assert save(client, third).status_code == 409
+    assert save(client, third, CLIENT_B).status_code == 201  # client B's list is separate
+    removal = client.delete(f"/api/reading-list/{quote(first, safe='')}", headers=headers())
+    assert removal.status_code == 204
+    assert save(client, third).status_code == 201

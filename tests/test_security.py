@@ -141,6 +141,24 @@ def test_a_wrong_method_is_a_405_in_the_error_envelope_and_keeps_the_allow_heade
     assert "POST" in res.headers["allow"]
 
 
+def test_an_unexpected_500_also_carries_the_security_headers_and_keeps_its_envelope():
+    class Exploding(FakeCrossrefClient):
+        async def search_works(self, *args, **kwargs):
+            raise RuntimeError("secret internal detail")
+
+    app = create_app(make_settings(), crossref=Exploding(), model=FakeModelClient())
+
+    res = TestClient(app, raise_server_exceptions=False).post("/api/ask", json=QUESTION)
+
+    assert res.status_code == 500
+    assert res.json()["error"]["code"] == "internal_error"
+    assert "secret internal detail" not in res.text
+    assert res.headers["x-content-type-options"] == "nosniff"
+    assert res.headers["referrer-policy"] == "no-referrer"
+    assert res.headers["x-frame-options"] == "DENY"
+    assert res.headers["content-security-policy"] == CONTENT_SECURITY_POLICY
+
+
 # --- Rate limit on /api/ask ---------------------------------------------------------------
 
 

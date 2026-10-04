@@ -30,6 +30,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     delete,
+    func,
     insert,
     select,
     text,
@@ -151,6 +152,17 @@ class ReadingListRepo:
             with self._engine.connect() as conn:
                 row = conn.execute(self._by_key(client_id, paper.doi)).mappings().one()
             return _to_saved(row), created
+
+        return self._guarded(run)
+
+    def count(self, client_id: str) -> int:
+        """How many papers this client has saved."""
+
+        def run() -> int:
+            query = select(func.count()).select_from(saved_papers)
+            query = query.where(saved_papers.c.client_id == client_id)
+            with self._engine.connect() as conn:
+                return conn.execute(query).scalar_one()
 
         return self._guarded(run)
 

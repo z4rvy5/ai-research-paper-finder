@@ -6,13 +6,13 @@ How the behaviour is verified, what was run, and what has **not** been run yet. 
 ## 1. Automated tests
 
 ```bash
-uv run pytest                                  # 420 tests, ~12 s, no keys or network needed
+uv run pytest                                  # 432 tests, ~12 s, no keys or network needed
 uv run ruff check . && uv run ruff format --check .
 uv run python scripts/run_tests_offline.py     # the same suite with all non-loopback network BLOCKED
 ```
 
-**Test count: 420.** Last results: 420 passed; Ruff clean; format clean; `git diff --check` clean;
-`run_tests_offline.py` 420 passed with **0** attempted connections.
+**Test count: 432.** Last results: 432 passed; Ruff clean; format clean; `git diff --check` clean;
+`run_tests_offline.py` 432 passed with **0** attempted connections.
 
 ### Mocked boundaries and the no-live-service property
 
@@ -78,13 +78,15 @@ the failure trace. (One early attempt was itself flawed and was redone; see AI_U
 
 Run locally (`uv run uvicorn app.main:create_app --factory`) or against the deployed URL.
 
-1. **Load the page.** The status line says the server is up (and which settings are missing). The reading list
+1. **Load the page.** The status line says `Server is up · Crossref public access` (or `polite access` if
+   `CROSSREF_MAILTO` is set), plus `(not configured: model API key)` if no model key is set. The reading list
    panel shows "No saved papers yet" (or your saved papers). *Expect:* no console errors.
 2. **Ask** `Find recent papers about using LLMs for software testing`. *Expect:* a loading message, then a summary
    line with three distinct counts (returned / remaining / presented), 3-5 paper cards (fewer only if fewer passed
    the filters, with a limitation saying so). Each card: title linked to `https://doi.org/<doi>`, authors (or
-   "Authors not listed in Crossref record"), year (or "Year unknown"), venue, DOI, an evidence badge, an explanation
-   labelled AI-written or "generated from metadata", an abstract disclosure or "No abstract in Crossref record", and
+   "Authors not listed in Crossref record"), year (or "Year unknown"), venue, DOI, an explanation under the heading
+   "Why it may be relevant" with one badge (`AI-generated · Crossref metadata · title only` / `… · title + abstract`,
+   or `Built from Crossref metadata (no AI text) · …` for a fallback explanation), an abstract disclosure or "No abstract in Crossref record", and
    "Missing in Crossref: …" where applicable. A degraded banner appears if a fallback was used.
 3. **Inspect the trace** ("Agent trace"). *Expect:* the interpreted request (search terms, years, types, assumptions
    such as the 3-year "recent" window), the steps with status and timing, the counts, the Crossref request(s) with

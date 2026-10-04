@@ -1,6 +1,7 @@
+import pytest
 from fastapi.testclient import TestClient
 
-from app.config import Settings
+from app.config import DEFAULT_DATABASE_URL, Settings
 from app.main import create_app
 from tests.conftest import make_settings
 
@@ -64,3 +65,18 @@ def test_health_treats_a_blank_model_key_as_not_configured():
     client = TestClient(create_app(make_settings(anthropic_api_key="  ")))
 
     assert client.get("/api/health").json()["model_configured"] is False
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_database_url_falls_back_to_the_default(monkeypatch, blank):
+    monkeypatch.setenv("DATABASE_URL", blank)
+
+    assert Settings(_env_file=None).database_url == DEFAULT_DATABASE_URL
+    assert Settings(_env_file=None, database_url=blank).database_url == DEFAULT_DATABASE_URL
+
+
+def test_a_real_database_url_is_left_alone(monkeypatch):
+    url = "postgresql://user:pw@host.example/db?sslmode=require"
+    monkeypatch.setenv("DATABASE_URL", url)
+
+    assert Settings(_env_file=None).database_url == url

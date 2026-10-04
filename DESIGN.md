@@ -95,7 +95,7 @@ the server supplies the metadata (a just-recommended paper from an in-process ca
 ## 7. API contracts, errors, security, privacy
 
 Endpoints and shapes are in the README. Every error is `{"error": {code, message, retryable}}`: 422 invalid
-input, 400 missing client id, 404 unknown DOI / not saved, 429 rate limit (`Retry-After`), 502/503 Crossref
+input, 400 missing client id, 404 unknown DOI / not saved, 409 reading list full, 429 rate limit (`Retry-After`), 502/503 Crossref
 (with a `trace` of the plan, failing step, retries and Crossref's rate-limit headers), 503 storage (no
 connection details). Model failures never fail a request: both stages have deterministic fallbacks and the
 answer is marked `degraded`.
@@ -103,8 +103,9 @@ answer is marked `degraded`.
 Credentials come only from server environment variables; the browser never receives the model key, database
 URL or Crossref contact address, and traces and errors contain fixed text, not provider responses. The page has
 no inline script or style, so a strict CSP (`default-src 'self'`) applies; server data is rendered with
-`textContent`, and links are built from DOIs, never from model or Crossref URL fields. A per-address rate
-limit and a daily model-call cap protect a public demo (in memory, per process).
+`textContent`, and links are built from DOIs, never from model or Crossref URL fields. Per-address rate
+limits (asks and saves, separately), a per-client cap on saved papers and a daily model-call cap
+protect a public demo (limits in memory, per process).
 
 ## 8. Limitations
 
