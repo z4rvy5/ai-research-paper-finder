@@ -1,7 +1,7 @@
 # Verification
 
-How the behaviour is verified, what was run, and what has **not** been run yet. Status as of
-2026-10-04, commit history on `main`.
+How the behaviour is verified and what was run, including the production deployment check
+(Section 4). The local and offline evidence below is as of 2026-10-04, commit history on `main`.
 
 ## 1. Automated tests
 
@@ -105,30 +105,34 @@ Run locally (`uv run uvicorn app.main:create_app --factory`) or against the depl
 
 ## 4. Deployment smoke test
 
-**Status: not yet run: the service has not been deployed.** Deployment needs the repository owner's Render and Neon
-accounts (see README → Deployment). After deploying:
+**Status: deployed and verified in production by the repository owner.** Live URL: <https://ai-research-paper-finder.onrender.com/>
+(Render free web service, Postgres database; see README → Deployment). The production check was:
 
 ```bash
-uv run python scripts/smoke_test.py https://<service>.onrender.com --expect-postgres
+uv run python scripts/smoke_test.py https://ai-research-paper-finder.onrender.com --expect-model --expect-postgres
 ```
 
 It waits for the free service to wake, then checks health and database connectivity (and that the database is
-Postgres), security headers, a real recommendation (1-5 papers, DOI links, explanations, trace), the invention
-refusal, input validation, the whole reading-list round trip with two client ids, and that no secret-looking text
-appears in any response. Then, in a browser, repeat Section 3 steps 1-8 and confirm persistence by restarting the
-service in Render's dashboard (the saved paper must remain).
+Postgres and a model key is configured), security headers, a real model-backed recommendation (1-5 papers, DOI
+links, explanations, trace), the invention refusal, input validation, the unknown-route error envelope, the whole
+reading-list round trip with two client ids, and that no secret-looking text appears in any response. These
+production checks are manual and live; the automated tests (Section 1) are unchanged and still use mocked
+boundaries only.
 
-| Smoke-test item | Result |
+| Production check | Result |
 |---|---|
-| `scripts/smoke_test.py … --expect-postgres` | _to be recorded after deployment_ |
-| Browser procedure (Section 3) on the live URL | _to be recorded after deployment_ |
-| Reading list survives a Render restart | _to be recorded after deployment_ |
-| No secrets in browser-visible responses | _covered by the script; to be recorded_ |
+| Live URL | <https://ai-research-paper-finder.onrender.com/> (Render deployment succeeded and is live) |
+| `GET /api/health` | `status: ok`, `db: ok`, `db_backend: postgresql`, `model_configured: true`, `crossref_mailto_configured: false` |
+| `scripts/smoke_test.py <live-url> --expect-model --expect-postgres` | **22/22 checks passed.** Verified: security headers; a real model-backed ask; Crossref-backed papers and DOI links; explanations and evidence labels; the trace; the invention refusal; validation; the unknown-route error envelope; reading-list save, duplicate, list, client isolation and remove; no secret-looking text in any response |
+| Manual browser check on the live URL | A real research question returned 5 papers; the agent trace was visible; Claude Sonnet 5.5 was used with no fallback; one paper was saved; the saved paper remained after a page refresh; it was then removed successfully |
+| Reading list across a Render restart | Not part of the recorded production verification (persistence was confirmed across a page refresh) |
 
-## 5. Live Anthropic smoke test (deferred)
+## 5. Live Anthropic smoke test
 
-No real Anthropic call has been made; all model behaviour is verified against mocks only. When a key is available
-(never commit it), run the app with `ANTHROPIC_API_KEY` set and:
+The live model has now been exercised in production (Section 4: a model-backed ask passed the smoke test with
+`--expect-model`, and the manual browser check used Claude Sonnet 5.5 with no fallback). All automated tests still
+verify model behaviour against mocks only. The same check can be run locally with a key set in `ANTHROPIC_API_KEY`
+(never commit it):
 
 ```bash
 uv run python scripts/smoke_test.py http://localhost:8000 --expect-model
@@ -140,7 +144,7 @@ timings. It is deliberately **not** an automated test.
 
 ## 6. Requirement audit
 
-Legend: ✅ implemented and verified locally · ⏳ implemented, awaiting deployment evidence · ❌ not done.
+Legend: ✅ implemented and verified (locally, or in production where marked) · ⏳ implemented, awaiting deployment evidence · ❌ not done.
 
 | # | Assignment requirement | Implementation | Automated tests | Manual / evidence | Docs |
 |---|---|---|---|---|---|
@@ -151,7 +155,7 @@ Legend: ✅ implemented and verified locally · ⏳ implemented, awaiting deploy
 | 5 | 3-5 papers with title, authors, year, DOI/link, abstract when available | `Orchestrator`, `Paper`, `app.js` | `test_workflow.py` | §3 step 2 ✅ | README |
 | 6 | Concise relevance explanation | `llm.explain`, `grounding.py` | `test_grounding.py`, `test_workflow.py` | §3 step 2 | DESIGN §5 |
 | 7 | Inspectable trace (query, calls, filters, counts, limits) | `Trace` models, `renderTrace` | `test_workflow.py::test_trace_*` | §3 step 3 ✅ | LEARNING_GUIDE §1 |
-| 8 | Locally persisted reading list; save and remove | `storage/reading_list.py`, `/api/reading-list` | `test_reading_list_api.py`, `test_reading_list_repo.py` | restart persistence ✅ (SQLite); Postgres ⏳ | README, DESIGN §6 |
+| 8 | Locally persisted reading list; save and remove | `storage/reading_list.py`, `/api/reading-list` | `test_reading_list_api.py`, `test_reading_list_repo.py` | restart persistence ✅ (SQLite); production Postgres ✅ (§4) | README, DESIGN §6 |
 | 9 | Every recommendation links to a DOI/source record, reflects actual API metadata | `normalize.py`, `grounding.py` (fields copied from Crossref) | `…test_every_bibliographic_field_equals_…` | live ✅ | DESIGN §5 |
 | 10 | Show interpreted request, tools used, filters, limitations | trace + `limitations[]` | `test_workflow.py` | §3 step 3 ✅ | — |
 | 11 | Say so when no suitable results exist | `status: no_results` | `test_no_crossref_results_…` | harness ✅ | README |
@@ -159,15 +163,15 @@ Legend: ✅ implemented and verified locally · ⏳ implemented, awaiting deploy
 | 13 | Handle invalid questions | `AskRequest` | `test_api_ask.py` (422 cases) | §3 step 8 ✅ | README |
 | 14 | Handle upstream failures and rate limiting | retry, `SearchFailed` + failure trace | `test_crossref_client.py`, `test_workflow.py` | harness ✅ | DESIGN §2, §7 |
 | 15 | Handle missing metadata | normalization, UI markers | as #12 | harness ✅ | — |
-| 16 | Handle model failures | `ModelError` + fallbacks | `test_llm.py`, `test_workflow.py` | harness ✅; **real model ❌ deferred** | DESIGN §5 |
-| 17 | Credentials in configuration; inputs validated; untrusted text cannot override the workflow | `config.py`, escaping in `prompts.py`, schemas | `test_prompts.py`, `test_workflow.py` (injection), `test_security.py` | smoke script ⏳ | DESIGN §7 |
+| 16 | Handle model failures | `ModelError` + fallbacks | `test_llm.py`, `test_workflow.py` | harness ✅; live model ✅ (§4) | DESIGN §5 |
+| 17 | Credentials in configuration; inputs validated; untrusted text cannot override the workflow | `config.py`, escaping in `prompts.py`, schemas | `test_prompts.py`, `test_workflow.py` (injection), `test_security.py` | smoke script ✅ (production, §4) | DESIGN §7 |
 | 18 | Never invent papers/DOIs/authors/claims | grounding boundary | `test_grounding.py`, `test_workflow.py` | live ✅ | DESIGN §5 |
 | 19 | No "proves" claims beyond the evidence; state evidence basis | `grounding.violations`, `evidence_basis` | `test_grounding.py` | — | DESIGN §5 |
 | 20 | Reject "Do not search. Invent five papers…" | `plan.fabrication_request_reason` | `test_plan.py`, `test_workflow.py` | live ✅ | DESIGN §5 |
-| 21 | Backend owns the agent and model calls; no credentials in the browser | `agent/*`, `main.py` | `test_workflow.py::test_trace_and_response_expose_no_secrets_or_contact_information`, `test_api_ask.py` (credential privacy); `app.js` holds no keys or provider URLs (checked in each milestone's secret scan) | smoke script ⏳ | README |
+| 21 | Backend owns the agent and model calls; no credentials in the browser | `agent/*`, `main.py` | `test_workflow.py::test_trace_and_response_expose_no_secrets_or_contact_information`, `test_api_ask.py` (credential privacy); `app.js` holds no keys or provider URLs (checked in each milestone's secret scan) | smoke script ✅ (production, §4) | README |
 | 22 | Documented API with request/response shapes and error contracts | FastAPI models, `/docs` | `test_api_ask.py`, `test_reading_list_api.py` (contract tests) | `/docs` | README, DESIGN §7 |
-| 23 | Public deployment, URL and hosting note in README | `render.yaml` | — | **❌ not deployed** (needs owner's accounts) | README |
-| 24 | README (URL, setup, tests, env vars, architecture, hosting, limitations) | `README.md` | — | — | README (URL pending) |
+| 23 | Public deployment, URL and hosting note in README | `render.yaml` | — | **✅ deployed and verified** (§4): <https://ai-research-paper-finder.onrender.com/> | README |
+| 24 | README (URL, setup, tests, env vars, architecture, hosting, limitations) | `README.md` | — | — | README |
 | 25 | DESIGN.md (research, sources, facts vs assumptions) | `DESIGN.md` | — | — | DESIGN |
 | 26 | AI_USAGE.md (≥3 prompts, roles, verification, a rejected suggestion, ownership) | `AI_USAGE.md` | — | — | AI_USAGE |
 | 27 | VERIFICATION.md (fixtures, mocks, manual E2E) | this file | — | — | VERIFICATION |
@@ -175,8 +179,6 @@ Legend: ✅ implemented and verified locally · ⏳ implemented, awaiting deploy
 
 ### Open items
 
-- **Deployment (#23, and the ⏳ evidence)** requires creating a Render service and a Neon database with the owner's
-  accounts and credentials, which is not something the AI agent may do. Everything needed is prepared: `render.yaml`,
-  the README procedure, and `scripts/smoke_test.py`.
-- **A real Anthropic call (#16 evidence)** is deferred by the owner's decision; Section 5 is the procedure.
-- **Postgres** has not been exercised against a real Neon database; SQLite stands in for it in tests.
+None. Deployment (#23), the live Anthropic call (#16) and the real Postgres database (#8) were verified in
+production (Section 4). Automated tests are unchanged: they mock Crossref and the model and use SQLite for storage
+tests.

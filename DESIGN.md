@@ -110,8 +110,9 @@ protect a public demo (limits in memory, per process).
 ## 8. Limitations
 
 Lexical relevance; metadata-only evidence; lexical prose checks; a deliberately narrow fabrication
-pre-check; in-memory limits; no automated browser tests. **Not yet exercised:** a real Anthropic call and a
-real Neon database (tests mock the model and use SQLite). The model is configuration: `claude-sonnet-5-5` by
+pre-check; in-memory limits; no automated browser tests. **Production verification:** the live Anthropic and
+Neon paths have been exercised in the deployed service, while the automated tests still mock the model and other
+external services and use SQLite for storage tests. The model is configuration: `claude-sonnet-5-5` by
 default for cost and latency [A: adequate quality at `low` effort]; `claude-opus-5-5` is a one-variable change.
 
 ## Sources

@@ -16,8 +16,8 @@ workflow and its resilience:** one bounded Crossref retry, a per-client rate lim
 model-call cap (§1c), security headers, a consistent error shape, and a UI that shows every
 state. **Milestone 6 added the submission documents** (`README.md`, `DESIGN.md`, `AI_USAGE.md`,
 `VERIFICATION.md`), the Render Blueprint (`render.yaml`), a deployment smoke-test script, and a
-database-backend check in `/api/health` (§1d). **Not done:** the public deployment itself (it needs
-the owner's Render and Neon accounts), and a real Anthropic call (all automated tests mock the model).
+database-backend check in `/api/health` (§1d). The service has since been deployed to Render with Postgres and verified in
+production, including a live model call (see `VERIFICATION.md` §4); all automated tests still mock the model.
 
 ---
 
@@ -213,7 +213,7 @@ stalled server never leaves the page waiting forever. A failed reading-list load
   0.0.0.0 --port $PORT`, health check `/api/health`. The Python version comes from
   `.python-version`. Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL`, optional `CROSSREF_MAILTO`) are
   `sync: false`: Render asks for them in its dashboard and they are never in the repository. The
-  build was verified locally in a clean copy; it has not yet run on Render.
+  build was verified locally in a clean copy and has now been deployed successfully on Render.
 - **A silent-failure guard.** If `DATABASE_URL` is missing, the app would use a SQLite file, and
   Render's disk is ephemeral, so every reading list would vanish on restart. Two defenses:
   `/api/health` reports `db_backend` (`"postgresql"` or `"sqlite"`), which
@@ -494,9 +494,12 @@ deterministic refusal of obvious requests to invent papers.
   smoke test. The tests deliberately never contact a database server.
 - **The recent-recommendations cache is per process.** After a restart (or on a second instance) a
   save falls back to a Crossref `/works/{doi}` lookup, which adds one request.
-- **Not yet deployed.** The Blueprint and smoke test are ready, but a Render service and a Neon
-  database need the owner's accounts; until then the README's live URL is a placeholder and the
-  deployment evidence in `VERIFICATION.md` is marked as not yet recorded.
-- **A real Anthropic call has not been made.** The prompts, structured-output schemas, real latency
-  and real refusals are verified only against mocks; `smoke_test.py --expect-model` is the planned
-  manual check.
+- **Deployed and verified.** The Blueprint is live on Render at
+  <https://ai-research-paper-finder.onrender.com/> with a Postgres database; the production smoke test with `--expect-model
+  --expect-postgres` passed 22/22 checks and a manual browser check passed (recorded in
+  `VERIFICATION.md` §4).
+- **The live model is verified in production, not by the automated tests.** A real Anthropic call
+  has now been exercised successfully in the deployed service: `smoke_test.py <live-url>
+  --expect-model --expect-postgres` passed 22/22 checks, and a manual browser check used Claude
+  Sonnet 5.5 with no fallback. The automated tests still verify the prompts, structured-output
+  schemas and model failure handling only against mocks.

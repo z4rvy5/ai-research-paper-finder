@@ -8,10 +8,9 @@ and later wording explanations, but **every bibliographic fact on screen (title,
 venue, abstract, DOI, link) comes from the [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/),
 never from the model**, and application code, not the model, decides which papers are shown.
 
-> **Live deployment:** _not deployed yet._ The service is configured for Render + Neon
-> ([`render.yaml`](render.yaml)), but creating it needs the repository owner's Render and Neon
-> accounts. **Add the URL here once it exists** (see [Deployment](#deployment)). Reviewers need no
-> credentials of their own: all keys are configured server-side.
+> **Live deployment:** <https://ai-research-paper-finder.onrender.com/>, hosted on Render (free web
+> service) with Neon Postgres ([`render.yaml`](render.yaml); see [Deployment](#deployment)).
+> Reviewers need no credentials of their own: all keys are configured server-side.
 
 ## What it does
 
@@ -138,6 +137,13 @@ persistent disks), while Neon's free plan is permanent. Trade-offs: Render's fre
 15 minutes idle and takes about a minute to wake, and Neon suspends an idle database after about
 5 minutes (the first request after that is slower).
 
+The application is deployed at <https://ai-research-paper-finder.onrender.com/>. The owner verified
+it in production: `GET /api/health` returned `status: ok`, `db: ok`, `db_backend: postgresql`,
+`model_configured: true` and `crossref_mailto_configured: false` (Crossref public access);
+`scripts/smoke_test.py` with `--expect-model --expect-postgres` passed 22/22 checks; and a manual
+browser check returned 5 papers for a real question, showed the trace (live model Claude Sonnet 5.5,
+no fallback), saved a paper that survived a page refresh, and removed it again.
+
 To deploy:
 
 1. Create a free **Neon** project and copy its connection string (`postgresql://…?sslmode=require`).
@@ -146,11 +152,10 @@ To deploy:
 3. After the first deploy, check `https://<your-service>.onrender.com/api/health`. You want
    `"db": "ok"` and `"db_backend": "postgresql"`. (`"sqlite"` means `DATABASE_URL` is missing; the
    reading list would be lost on restart, and the app logs a warning.)
-4. Put the URL at the top of this file and run the deployment smoke test in
-   [VERIFICATION.md](VERIFICATION.md).
+4. Run the deployment smoke test in [VERIFICATION.md](VERIFICATION.md).
 
 The Render build and start commands (`uv sync --frozen --no-dev`, then `uvicorn … --factory`) were
-verified locally in a clean copy; they have not yet run on Render.
+verified locally in a clean copy and have since run successfully on Render.
 
 ### Usage limits
 
@@ -182,11 +187,10 @@ fallbacks and marks the answer "degraded". Both limits are in memory and reset o
 - **The fabrication pre-check is deliberately narrow.** It recognises obvious instructions; a
   paraphrase relies on the model's classification, and no fabricated paper can appear either way
   because every paper comes from Crossref.
-- **A real Anthropic call has not been exercised yet.** All automated tests use a mocked model; a
-  manual smoke test with a real key is still to be done (see [VERIFICATION.md](VERIFICATION.md)).
-- **Neon has not been exercised yet either.** Automated tests use SQLite; the SQL is portable, and
-  database failures are tested with a failing driver, but the real Neon connection is verified only by
-  the manual smoke test.
+- **Automated tests still mock the external boundaries.** The live Anthropic model and the real Neon
+  Postgres database have now been verified in production (smoke test and manual browser check, above),
+  but the automated test suite itself uses a mocked model and mocked Crossref, and SQLite instead of
+  Neon, so it does not exercise them.
 - **Rate limits and the daily cap are per process and in memory.**
 - **No automated browser tests.** The UI is checked by static rules (`tests/test_security.py`) and the
   manual procedure.
