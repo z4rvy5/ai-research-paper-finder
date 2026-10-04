@@ -4,6 +4,7 @@ Docs: https://www.crossref.org/documentation/retrieve-metadata/rest-api/
 """
 
 import logging
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 import httpx2
@@ -64,7 +65,15 @@ class SearchResult(BaseModel):
 class PaperSearch(Protocol):
     """The boundary the rest of the app depends on; tests substitute a fake."""
 
-    async def search_works(self, query: str, rows: int = DEFAULT_ROWS) -> SearchResult: ...
+    async def search_works(
+        self,
+        query: str,
+        rows: int = DEFAULT_ROWS,
+        *,
+        from_year: int | None = None,
+        until_year: int | None = None,
+        types: Sequence[str] = (),
+    ) -> SearchResult: ...
 
     async def aclose(self) -> None: ...
 
@@ -76,13 +85,40 @@ class PaperSearch(Protocol):
 # unset, no address is sent at all and requests use the public pool (lower rate limits).
 
 
-def build_search_params(query: str, rows: int) -> dict[str, str | int]:
-    return {
+def build_filter(
+    from_year: int | None = None, until_year: int | None = None, types: Sequence[str] = ()
+) -> str | None:
+    """Crossref `filter=` value, or None when there are no constraints.
+
+    Different filters are ANDed. Repeating the same filter name ORs the values, so several
+    `type:` entries mean "any of these types".
+    """
+    parts = []
+    if from_year is not None:
+        parts.append(f"from-pub-date:{from_year:04d}-01-01")
+    if until_year is not None:
+        parts.append(f"until-pub-date:{until_year:04d}-12-31")
+    parts.extend(f"type:{work_type}" for work_type in types)
+    return ",".join(parts) or None
+
+
+def build_search_params(
+    query: str,
+    rows: int,
+    *,
+    from_year: int | None = None,
+    until_year: int | None = None,
+    types: Sequence[str] = (),
+) -> dict[str, str | int]:
+    params: dict[str, str | int] = {
         "query.bibliographic": query,
         "rows": rows,
         "sort": "relevance",
         "select": ",".join(SELECT_FIELDS),
     }
+    if filter_value := build_filter(from_year, until_year, types):
+        params["filter"] = filter_value
+    return params
 
 
 def user_agent(mailto: str | None) -> str:
@@ -107,8 +143,18 @@ class CrossrefClient:
             transport=transport,
         )
 
-    async def search_works(self, query: str, rows: int = DEFAULT_ROWS) -> SearchResult:
-        params = build_search_params(query, rows)
+    async def search_works(
+        self,
+        query: str,
+        rows: int = DEFAULT_ROWS,
+        *,
+        from_year: int | None = None,
+        until_year: int | None = None,
+        types: Sequence[str] = (),
+    ) -> SearchResult:
+        params = build_search_params(
+            query, rows, from_year=from_year, until_year=until_year, types=types
+        )
         response = await self._get("/works", params)
         message = _message(response)
         items = message.get("items")

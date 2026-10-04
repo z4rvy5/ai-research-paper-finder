@@ -1,23 +1,115 @@
-"""Test doubles for the app's external boundaries."""
+"""Test doubles for the app's two external boundaries: Crossref and the model."""
+
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from app.crossref.client import DEFAULT_ROWS, CrossrefError, SearchResult
+from app.schemas import Candidate, ExplanationItem, Explanations, SearchPlan
+
+DEFAULT_PLAN = SearchPlan(
+    intent="find_papers", topic_query="large language models software testing"
+)
 
 
 class FakeCrossrefClient:
-    """Implements the `PaperSearch` protocol; returns a canned result or raises an error."""
+    """Implements `PaperSearch`.
 
-    def __init__(self, result: SearchResult | None = None, error: CrossrefError | None = None):
-        self.result = result
-        self.error = error
-        self.queries: list[str] = []
+    Give it one `result` (returned for every call), one `error`, or a `responses` list that is
+    consumed in order (the last entry repeats). Every call is recorded in `calls`.
+    """
+
+    def __init__(
+        self,
+        result: SearchResult | None = None,
+        error: CrossrefError | None = None,
+        responses: Sequence[SearchResult | CrossrefError] | None = None,
+    ):
+        self._responses = (
+            list(responses) if responses else ([error or result] if (error or result) else [])
+        )
+        self.calls: list[dict[str, Any]] = []
         self.closed = False
 
-    async def search_works(self, query: str, rows: int = DEFAULT_ROWS) -> SearchResult:
-        self.queries.append(query)
-        if self.error:
-            raise self.error
-        assert self.result is not None, "FakeCrossrefClient needs a result or an error"
-        return self.result
+    @property
+    def queries(self) -> list[str]:
+        return [call["query"] for call in self.calls]
+
+    async def search_works(
+        self,
+        query: str,
+        rows: int = DEFAULT_ROWS,
+        *,
+        from_year: int | None = None,
+        until_year: int | None = None,
+        types: Sequence[str] = (),
+    ) -> SearchResult:
+        self.calls.append(
+            {
+                "query": query,
+                "rows": rows,
+                "from_year": from_year,
+                "until_year": until_year,
+                "types": list(types),
+            }
+        )
+        assert self._responses, "FakeCrossrefClient needs a result, an error or responses"
+        response = self._responses[min(len(self.calls), len(self._responses)) - 1]
+        if isinstance(response, CrossrefError):
+            raise response
+        return response
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def default_explanations(question: str, candidates: Sequence[Candidate]) -> Explanations:
+    """A well-behaved model: one modest, supported sentence per candidate."""
+    return Explanations(
+        items=[
+            ExplanationItem(
+                ref=candidate.ref,  # type: ignore[arg-type]
+                explanation=(
+                    "May be relevant to your question based on its title only."
+                    if candidate.evidence_basis == "title_only"
+                    else "May be relevant to your question based on its title and abstract."
+                ),
+            )
+            for candidate in candidates
+        ]
+    )
+
+
+class FakeModelClient:
+    """Implements `ModelClient` with scripted behavior.
+
+    `plan` and `explanations` may each be a value, an Exception instance (raised when called),
+    or (for explanations) a callable `(question, candidates) -> Explanations`.
+    """
+
+    def __init__(
+        self,
+        plan: SearchPlan | Exception | None = None,
+        explanations: Explanations | Exception | Callable[..., Explanations] | None = None,
+    ):
+        self._plan = DEFAULT_PLAN if plan is None else plan
+        self._explanations = default_explanations if explanations is None else explanations
+        self.interpret_questions: list[str] = []
+        self.explain_calls: list[tuple[str, list[Candidate]]] = []
+        self.closed = False
+
+    async def interpret(self, question: str) -> SearchPlan:
+        self.interpret_questions.append(question)
+        if isinstance(self._plan, Exception):
+            raise self._plan
+        return self._plan
+
+    async def explain(self, question: str, candidates: Sequence[Candidate]) -> Explanations:
+        self.explain_calls.append((question, list(candidates)))
+        if isinstance(self._explanations, Exception):
+            raise self._explanations
+        if callable(self._explanations):
+            return self._explanations(question, candidates)
+        return self._explanations
 
     async def aclose(self) -> None:
         self.closed = True

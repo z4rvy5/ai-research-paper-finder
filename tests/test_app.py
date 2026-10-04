@@ -57,3 +57,9 @@ def test_settings_read_from_environment(monkeypatch):
 
     assert settings.anthropic_model == "claude-opus-5-5"
     assert settings.crossref_mailto == "dev@example.org"
+
+
+def test_health_treats_a_blank_model_key_as_not_configured():
+    client = TestClient(create_app(make_settings(anthropic_api_key="  ")))
+
+    assert client.get("/api/health").json()["model_configured"] is False

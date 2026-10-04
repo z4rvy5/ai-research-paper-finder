@@ -21,3 +21,10 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./data/app.db"
     max_daily_model_calls: int = 500
+
+    @property
+    def model_api_key(self) -> str | None:
+        """The model API key, or None when unset or blank (a copied `.env.example` is blank)."""
+        if self.anthropic_api_key is None:
+            return None
+        return self.anthropic_api_key.get_secret_value().strip() or None

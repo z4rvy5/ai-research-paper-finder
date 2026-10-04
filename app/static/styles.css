@@ -117,3 +117,89 @@ a {
 ol li {
   margin-bottom: 8px;
 }
+
+.message.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.summary.status-no_results,
+.summary.status-refused {
+  color: var(--warn);
+}
+
+ol.papers {
+  padding-left: 0;
+  list-style: none;
+}
+
+li.paper {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+li.paper h3 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+}
+
+li.paper p {
+  margin: 4px 0;
+}
+
+.meta,
+.doi,
+.explanation-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.missing {
+  color: var(--warn);
+  font-style: italic;
+  font-size: 0.9rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+details.abstract p {
+  margin: 6px 0 0;
+}
+
+details.trace {
+  margin-top: 24px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+details.trace summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.trace-section h4 {
+  margin: 14px 0 4px;
+}
+
+.trace-section ul {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+pre {
+  overflow-x: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
