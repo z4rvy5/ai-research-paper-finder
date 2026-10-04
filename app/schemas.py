@@ -1,5 +1,6 @@
 """API request/response models. These are the documented contracts of the HTTP API."""
 
+import re
 import unicodedata
 from enum import StrEnum
 from typing import Any, Literal
@@ -10,6 +11,33 @@ from app.crossref.client import RateLimitInfo
 
 QUESTION_MIN_CHARS = 3
 QUESTION_MAX_CHARS = 500
+MAX_DOI_CHARS = 255
+
+_DOI_PREFIXES = (
+    "https://doi.org/",
+    "http://doi.org/",
+    "https://dx.doi.org/",
+    "http://dx.doi.org/",
+    "doi:",
+)
+_DOI_RE = re.compile(r"10\.\d{4,9}/\S+")
+
+
+def normalize_doi(value: str) -> str:
+    """A canonical (lowercase, prefix-free) DOI, or ValueError. Used for every DOI we accept."""
+    text = value.strip()
+    for prefix in _DOI_PREFIXES:
+        if text.lower().startswith(prefix):
+            text = text[len(prefix) :].strip()
+            break
+    text = text.lower()
+    if (
+        len(text) > MAX_DOI_CHARS
+        or not _DOI_RE.fullmatch(text)
+        or any(unicodedata.category(ch) == "Cc" for ch in text)
+    ):
+        raise ValueError("Enter a DOI such as 10.1000/xyz123.")
+    return text
 
 
 class ErrorBody(BaseModel):
@@ -127,6 +155,39 @@ class Candidate(BaseModel):
 
 
 # ---- Trace (returned in the response; never persisted) ----------------------------------------
+
+
+class SavePaperRequest(BaseModel):
+    """Saving takes ONLY a DOI. The server looks the metadata up itself, so a client can never
+    store bibliographic data of its own choosing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    doi: str = Field(max_length=2 * MAX_DOI_CHARS)  # raw cap before normalization
+
+    @field_validator("doi")
+    @classmethod
+    def clean_doi(cls, value: str) -> str:
+        return normalize_doi(value)
+
+
+class SavedPaper(BaseModel):
+    """A paper in a reading list: Crossref metadata as stored when it was saved."""
+
+    doi: str
+    title: str | None
+    url: str
+    authors: list[str]
+    year: int | None
+    venue: str | None
+    abstract: str | None
+    work_type: str | None
+    missing_fields: list[str]
+    saved_at: str  # ISO 8601, UTC
+
+
+class ReadingListResponse(BaseModel):
+    items: list[SavedPaper]
 
 
 class SearchInfo(BaseModel):

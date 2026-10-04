@@ -3,8 +3,12 @@
 from collections.abc import Callable, Sequence
 from typing import Any
 
+import psycopg
+from sqlalchemy import create_engine
+
 from app.crossref.client import DEFAULT_ROWS, CrossrefError, SearchResult
 from app.schemas import Candidate, ExplanationItem, Explanations, SearchPlan
+from app.storage.reading_list import ReadingListRepo, normalize_database_url
 
 DEFAULT_PLAN = SearchPlan(
     intent="find_papers", topic_query="large language models software testing"
@@ -23,7 +27,10 @@ class FakeCrossrefClient:
         result: SearchResult | None = None,
         error: CrossrefError | None = None,
         responses: Sequence[SearchResult | CrossrefError] | None = None,
+        works: dict[str, dict[str, Any] | CrossrefError] | None = None,
     ):
+        self.works = works or {}  # doi -> raw Crossref record (or an error) for get_work
+        self.get_work_calls: list[str] = []
         self._responses = (
             list(responses) if responses else ([error or result] if (error or result) else [])
         )
@@ -57,6 +64,13 @@ class FakeCrossrefClient:
         if isinstance(response, CrossrefError):
             raise response
         return response
+
+    async def get_work(self, doi: str) -> dict[str, Any] | None:
+        self.get_work_calls.append(doi)
+        outcome = self.works.get(doi)  # a missing DOI is a Crossref 404
+        if isinstance(outcome, CrossrefError):
+            raise outcome
+        return outcome
 
     async def aclose(self) -> None:
         self.closed = True
@@ -113,3 +127,24 @@ class FakeModelClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+UNREACHABLE_DATABASE_URL = (
+    "postgresql://appuser:pa55w0rd-TOPSECRET@127.0.0.1:1/neondb?sslmode=require"
+)
+DATABASE_SECRETS = ("pa55w0rd", "TOPSECRET", "appuser", "127.0.0.1", "neondb")
+
+
+def failing_repo() -> ReadingListRepo:
+    """A repository whose driver fails instantly with a message full of connection details,
+    like a real driver error (host, user, password) would be."""
+
+    def refuse():
+        raise psycopg.OperationalError(
+            'connection to server at "127.0.0.1", port 1 failed: FATAL: password authentication '
+            'failed for user "appuser" (pa55w0rd-TOPSECRET) database "neondb"'
+        )
+
+    return ReadingListRepo(
+        create_engine(normalize_database_url(UNREACHABLE_DATABASE_URL), creator=refuse)
+    )

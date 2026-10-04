@@ -244,3 +244,83 @@ async def test_error_text_does_not_contain_address_even_if_the_library_exception
     error = await failing_search(client)
 
     assert_address_absent(f"{error} {error.message} {error.code}", address)
+
+
+# --- get_work: one record by DOI (used when saving a paper that was not just recommended) --------
+
+
+def work_response(item):
+    body = {"status": "ok", "message-type": "work", "message-version": "1.0.0", "message": item}
+    return lambda request: httpx2.Response(
+        200, json=body, headers={"x-api-pool": "polite-single", "x-rate-limit-limit": "10"}
+    )
+
+
+async def test_get_work_returns_the_raw_record_from_the_works_doi_route():
+    record = {"DOI": "10.1000/abc", "title": ["T"], "type": "journal-article"}
+    client, seen = mock_client(work_response(record))
+
+    result = await client.get_work("10.1000/abc")
+
+    assert result == record
+    assert seen[0].method == "GET" and seen[0].url.path == "/works/10.1000/abc"
+    assert seen[0].url.query == b""  # no parameters; in particular no contact address
+    assert seen[0].headers["user-agent"] == f"paper-finder/0.1 (mailto:{MAILTO})"
+
+
+async def test_get_work_treats_crossrefs_plain_text_404_as_not_found():
+    client, _ = mock_client(lambda request: httpx2.Response(404, text="Resource not found."))
+
+    assert await client.get_work("10.9999/does-not-exist") is None
+
+
+async def test_get_work_path_encodes_characters_that_would_change_the_url():
+    client, seen = mock_client(work_response({"DOI": "10.1000/a#b?c d"}))
+
+    await client.get_work("10.1000/a#b?c d")
+
+    assert seen[0].url.raw_path == b"/works/10.1000/a%23b%3Fc%20d"
+    assert seen[0].url.fragment == ""  # the '#' did not become a URL fragment
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(429, "upstream_rate_limited"), (500, "upstream_unavailable"), (400, "upstream_rejected")],
+)
+async def test_get_work_errors_map_like_search_errors(status, code):
+    client, _ = mock_client(lambda request: httpx2.Response(status, text="error"))
+
+    with pytest.raises(CrossrefError) as exc_info:
+        await client.get_work("10.1000/abc")
+
+    assert exc_info.value.code == code and exc_info.value.status == status
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx2.Response(200, text="not json"),
+        httpx2.Response(200, json={"status": "ok", "message": {"no": "doi"}}),
+        httpx2.Response(200, json={"status": "ok", "message": {"DOI": 5}}),
+        httpx2.Response(200, json={"status": "failed", "message": {"DOI": "10.1/x"}}),
+    ],
+)
+async def test_get_work_rejects_malformed_responses(response):
+    client, _ = mock_client(lambda request: response)
+
+    with pytest.raises(CrossrefError) as exc_info:
+        await client.get_work("10.1000/abc")
+
+    assert exc_info.value.code == "upstream_invalid_response"
+
+
+async def test_get_work_network_failure_is_unavailable():
+    def fail(request):
+        raise httpx2.ConnectError("no route", request=request)
+
+    client, _ = mock_client(fail)
+
+    with pytest.raises(CrossrefError) as exc_info:
+        await client.get_work("10.1000/abc")
+
+    assert exc_info.value.code == "upstream_unavailable" and exc_info.value.retryable

@@ -6,6 +6,7 @@ Docs: https://www.crossref.org/documentation/retrieve-metadata/rest-api/
 import logging
 from collections.abc import Sequence
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx2
 from pydantic import BaseModel
@@ -74,6 +75,10 @@ class PaperSearch(Protocol):
         until_year: int | None = None,
         types: Sequence[str] = (),
     ) -> SearchResult: ...
+
+    async def get_work(self, doi: str) -> dict[str, Any] | None:
+        """The raw Crossref record for one DOI, or None if Crossref has no such DOI."""
+        ...
 
     async def aclose(self) -> None: ...
 
@@ -174,6 +179,21 @@ class CrossrefClient:
             rate_limit=_rate_limit_info(response.headers),
         )
 
+    async def get_work(self, doi: str) -> dict[str, Any] | None:
+        """One record via `GET /works/{doi}`. Unknown DOIs answer 404 (plain text), meaning None."""
+        response = await self._get(f"/works/{quote(doi, safe='/:;()-._')}", {}, not_found_ok=True)
+        if response.status_code == 404:
+            return None
+        message = _message(response)
+        if not isinstance(message.get("DOI"), str):
+            raise CrossrefError(
+                "upstream_invalid_response",
+                "Crossref returned an unexpected response shape.",
+                retryable=False,
+                status=response.status_code,
+            )
+        return message
+
     async def aclose(self) -> None:
         await self._http.aclose()
 
@@ -183,7 +203,9 @@ class CrossrefClient:
         The address is never in a URL now; this only covers Crossref echoing the User-Agent."""
         return text.replace(self._mailto, "[redacted]") if self._mailto else text
 
-    async def _get(self, path: str, params: dict[str, str | int]) -> httpx2.Response:
+    async def _get(
+        self, path: str, params: dict[str, str | int], *, not_found_ok: bool = False
+    ) -> httpx2.Response:
         try:
             response = await self._http.get(path, params=params)
         except httpx2.TimeoutException as exc:
@@ -196,7 +218,7 @@ class CrossrefClient:
             ) from exc
 
         status = response.status_code
-        if status == 200:
+        if status == 200 or (status == 404 and not_found_ok):
             return response
         if status == 429:
             raise CrossrefError(

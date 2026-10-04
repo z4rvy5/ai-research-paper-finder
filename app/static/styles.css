@@ -203,3 +203,50 @@ pre {
   border-radius: 6px;
   font-size: 0.8rem;
 }
+
+.actions {
+  margin: 8px 0 0;
+}
+
+.action-note {
+  margin-left: 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.action-note.error {
+  color: var(--error);
+}
+
+button.save-button.saved {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+#reading-list {
+  margin-top: 32px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+#reading-list .note {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+#reading-list-items {
+  padding-left: 0;
+  list-style: none;
+}
+
+li.saved-paper {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+li.saved-paper .meta {
+  margin: 2px 0;
+}

@@ -4,12 +4,14 @@ Run locally with:  uv run uvicorn app.main:create_app --factory --reload
 """
 
 import logging
+import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Header, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,7 +20,21 @@ from app.agent.llm import AnthropicModelClient, ModelClient
 from app.agent.orchestrator import Orchestrator, SearchFailed
 from app.config import Settings
 from app.crossref.client import CrossrefClient, CrossrefError, PaperSearch
-from app.schemas import AskRequest, AskResponse, ErrorResponse, HealthResponse, Trace
+from app.crossref.normalize import normalize_work
+from app.errors import ApiError
+from app.schemas import (
+    AskRequest,
+    AskResponse,
+    ErrorResponse,
+    HealthResponse,
+    ReadingListResponse,
+    SavedPaper,
+    SavePaperRequest,
+    Trace,
+    normalize_doi,
+)
+from app.storage.paper_cache import PaperCache
+from app.storage.reading_list import ReadingListRepo, StorageError, make_engine
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +49,14 @@ CROSSREF_ERROR_STATUS = {
     "upstream_error": 502,
 }
 
+READING_LIST_ERRORS = {
+    400: {"model": ErrorResponse},
+    404: {"model": ErrorResponse},
+    422: {"model": ErrorResponse},
+    502: {"model": ErrorResponse},
+    503: {"model": ErrorResponse},
+}
+
 
 def error_response(
     status: int, code: str, message: str, retryable: bool, trace: Trace | None = None
@@ -45,25 +69,48 @@ def error_response(
     return JSONResponse(status_code=status, content=body)
 
 
+def client_id_header(x_client_id: str | None = Header(default=None)) -> str:
+    """The browser's anonymous id from `X-Client-Id`.
+
+    This separates one browser's reading list from another's. It is NOT authentication: it is a
+    random value the browser generated, and anyone who has it can use that list.
+    """
+    if not x_client_id:
+        raise ApiError(400, "missing_client_id", "The X-Client-Id header is required.")
+    try:
+        return str(uuid.UUID(x_client_id.strip()))  # canonical lowercase form
+    except ValueError:
+        raise ApiError(400, "invalid_client_id", "X-Client-Id must be a UUID.") from None
+
+
 def create_app(
     settings: Settings | None = None,
     crossref: PaperSearch | None = None,
     model: ModelClient | None = None,
     clock: Callable[[], date] = date.today,
+    repo: ReadingListRepo | None = None,
 ) -> FastAPI:
-    """Build the app. Tests pass explicit settings and fake Crossref and model clients."""
+    """Build the app. Tests pass explicit settings and fake Crossref/model clients and a repo."""
     settings = settings or Settings()
     crossref = crossref or CrossrefClient(settings.crossref_mailto)
     model = model or AnthropicModelClient(settings)
+    repo = repo or ReadingListRepo(make_engine(settings.database_url))
     orchestrator = Orchestrator(
         model=model, crossref=crossref, model_name=settings.anthropic_model, clock=clock
     )
+    recent_papers = PaperCache()  # papers we just recommended, so saving needs no second lookup
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        try:
+            await run_in_threadpool(repo.ensure_schema)
+        except StorageError:
+            # The app still starts: /api/ask works and the reading list retries on first use.
+            log.warning("Reading-list database not reachable at startup; will retry on use")
         yield
         await crossref.aclose()
         await model.aclose()
+        await run_in_threadpool(repo.dispose)
 
     app = FastAPI(title="AI Research Paper Finder", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
@@ -73,6 +120,14 @@ def create_app(
         first = exc.errors()[0] if exc.errors() else {}
         message = str(first.get("msg", "Invalid request.")).removeprefix("Value error, ")
         return error_response(422, "invalid_input", message, retryable=False)
+
+    @app.exception_handler(ApiError)
+    async def on_api_error(request: Request, exc: ApiError) -> JSONResponse:
+        return error_response(exc.status, exc.code, exc.message, exc.retryable)
+
+    @app.exception_handler(StorageError)
+    async def on_storage_error(request: Request, exc: StorageError) -> JSONResponse:
+        return error_response(503, exc.code, exc.message, exc.retryable)
 
     @app.exception_handler(SearchFailed)
     async def on_search_failed(request: Request, exc: SearchFailed) -> JSONResponse:
@@ -92,10 +147,11 @@ def create_app(
         return error_response(500, "internal_error", "Something went wrong on the server.", False)
 
     @app.get("/api/health", response_model=HealthResponse)
-    def health() -> HealthResponse:
+    async def health() -> HealthResponse:
+        database_ok = await run_in_threadpool(repo.ping)
         return HealthResponse(
-            status="ok",
-            db="not_checked",
+            status="ok",  # the process is up; `db` says whether the database answered
+            db="ok" if database_ok else "unavailable",
             model_configured=settings.model_api_key is not None,
             crossref_mailto_configured=bool(settings.crossref_mailto),
         )
@@ -111,7 +167,59 @@ def create_app(
         },
     )
     async def ask(body: AskRequest) -> AskResponse:
-        return await orchestrator.ask(body.question)
+        result = await orchestrator.ask(body.question)
+        for paper in result.papers:
+            recent_papers.put(paper)
+        return result
+
+    # ---- reading list (scoped by X-Client-Id; see client_id_header) ---------------------------
+
+    @app.get("/api/reading-list", response_model=ReadingListResponse, responses=READING_LIST_ERRORS)
+    async def list_reading_list(client_id: str = Depends(client_id_header)) -> ReadingListResponse:
+        items = await run_in_threadpool(repo.list_papers, client_id)
+        return ReadingListResponse(items=items)
+
+    @app.post(
+        "/api/reading-list",
+        response_model=SavedPaper,
+        status_code=201,
+        responses={200: {"model": SavedPaper}, **READING_LIST_ERRORS},
+    )
+    async def save_paper(
+        body: SavePaperRequest, response: Response, client_id: str = Depends(client_id_header)
+    ) -> SavedPaper:
+        """201 when newly saved, 200 when it was already in the list (saving twice is fine)."""
+        existing = await run_in_threadpool(repo.get, client_id, body.doi)
+        if existing is not None:
+            response.status_code = 200
+            return existing
+
+        # The metadata is always Crossref's: from a paper we just recommended, or looked up now.
+        paper = recent_papers.get(body.doi)
+        if paper is None:
+            record = await crossref.get_work(body.doi)  # CrossrefError -> 502/503 envelope
+            paper = normalize_work(record, 0) if record else None
+            if paper is None or paper.doi != body.doi:
+                raise ApiError(404, "doi_not_found", "Crossref has no record for that DOI.")
+        saved, created = await run_in_threadpool(repo.add, client_id, paper)
+        response.status_code = 201 if created else 200
+        return saved
+
+    @app.delete(
+        "/api/reading-list/{doi:path}",
+        status_code=204,
+        response_class=Response,
+        responses=READING_LIST_ERRORS,
+    )
+    async def remove_paper(doi: str, client_id: str = Depends(client_id_header)) -> Response:
+        try:
+            doi = normalize_doi(doi)
+        except ValueError as exc:
+            raise ApiError(422, "invalid_input", str(exc)) from None
+        removed = await run_in_threadpool(repo.remove, client_id, doi)
+        if not removed:
+            raise ApiError(404, "not_saved", "That paper is not in your reading list.")
+        return Response(status_code=204)
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:

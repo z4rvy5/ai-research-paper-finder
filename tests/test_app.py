@@ -11,7 +11,7 @@ def test_health_reports_ok_and_unconfigured_credentials(client: TestClient):
     assert res.status_code == 200
     assert res.json() == {
         "status": "ok",
-        "db": "not_checked",
+        "db": "ok",  # a real check since M4 (was a placeholder)
         "model_configured": False,
         "crossref_mailto_configured": False,
     }

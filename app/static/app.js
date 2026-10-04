@@ -5,6 +5,67 @@
 const DOI_PREFIX = "https://doi.org/";
 const MAX_AUTHORS_SHOWN = 6;
 
+// ---- anonymous browser id (NOT authentication) ---------------------------------------------
+// A random id this browser generates and sends as X-Client-Id so the server can keep one
+// browser's reading list apart from another's. Anyone who has the id can use that list, and
+// clearing site data loses it. It is not a login and not private.
+
+const CLIENT_ID_KEY = "paperFinderClientId";
+let fallbackClientId = null; // used when localStorage is unavailable (private mode, blocked)
+
+function newClientId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function getClientId() {
+  try {
+    let id = localStorage.getItem(CLIENT_ID_KEY);
+    if (!id) {
+      id = newClientId();
+      localStorage.setItem(CLIENT_ID_KEY, id);
+    }
+    return id;
+  } catch (err) {
+    fallbackClientId = fallbackClientId ?? newClientId();
+    return fallbackClientId;
+  }
+}
+
+// Reading-list requests never throw: they resolve to { ok, status, body }.
+async function listApi(path, options = {}) {
+  try {
+    const res = await fetch(`/api/reading-list${path}`, {
+      ...options,
+      headers: { "X-Client-Id": getClientId(), "Content-Type": "application/json" },
+    });
+    let body = null;
+    if (res.status !== 204) {
+      try {
+        body = await res.json();
+      } catch (err) {
+        body = null;
+      }
+    }
+    return { ok: res.ok, status: res.status, body };
+  } catch (err) {
+    return { ok: false, status: 0, body: null };
+  }
+}
+
+function listErrorText(result, action) {
+  const error = result.body?.error;
+  if (!error) return `Could not ${action}: the server could not be reached. Please try again.`;
+  const retry = error.retryable && !/try again/i.test(error.message) ? " Please try again shortly." : "";
+  return `Could not ${action}: ${error.message}${retry}`;
+}
+
+const savedDois = new Set(); // DOIs in this browser's reading list, as last loaded from the server
+
 function h(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -111,7 +172,89 @@ function renderPaper(paper, index) {
   if (paper.missing_fields.length) {
     card.appendChild(h("p", "missing", `Missing in Crossref: ${paper.missing_fields.join(", ")}`));
   }
+  card.appendChild(saveControls(paper.doi));
   return card;
+}
+
+// ---- reading list ---------------------------------------------------------------------------
+
+function setSaveButtonState(button) {
+  const saved = savedDois.has(button.dataset.doi);
+  button.textContent = saved ? "Saved: remove from reading list" : "Save to reading list";
+  button.classList.toggle("saved", saved);
+}
+
+function refreshSaveButtons() {
+  document.querySelectorAll("button.save-button").forEach(setSaveButtonState);
+}
+
+function saveControls(doi) {
+  const row = h("p", "actions");
+  const button = h("button", "save-button");
+  button.type = "button";
+  button.dataset.doi = doi;
+  const note = h("span", "action-note");
+  button.addEventListener("click", () => toggleSaved(doi, button, note));
+  setSaveButtonState(button);
+  row.append(button, note);
+  return row;
+}
+
+// Saves the paper if it isn't saved, removes it if it is. The server is the source of truth:
+// after every change the list is reloaded and every button is refreshed from it.
+async function toggleSaved(doi, button, note) {
+  const saving = !savedDois.has(doi);
+  button.disabled = true;
+  note.className = "action-note";
+  note.textContent = saving ? "Saving…" : "Removing…";
+  const result = saving
+    ? await listApi("", { method: "POST", body: JSON.stringify({ doi }) })
+    : await listApi(`/${encodeURIComponent(doi)}`, { method: "DELETE" });
+  button.disabled = false;
+  const alreadyGone = !saving && result.body?.error?.code === "not_saved";
+  if (result.ok || alreadyGone) {
+    note.textContent = "";
+    await loadReadingList();
+  } else {
+    note.className = "action-note error";
+    note.textContent = listErrorText(result, saving ? "save this paper" : "remove this paper");
+  }
+}
+
+function renderReadingListItem(item) {
+  const li = h("li", "saved-paper");
+  const title = h("a", "", item.title ?? "(No title in Crossref record)");
+  if (item.url.startsWith(DOI_PREFIX)) {
+    title.href = item.url;
+    title.target = "_blank";
+    title.rel = "noopener noreferrer";
+  }
+  const meta = h("p", "meta");
+  meta.append(authorsLine(item), " · ");
+  meta.append(item.year ? h("span", "", String(item.year)) : h("span", "missing", "Year unknown"));
+  li.append(title, meta, saveControls(item.doi));
+  return li;
+}
+
+async function loadReadingList() {
+  const status = document.getElementById("reading-list-status");
+  const list = document.getElementById("reading-list-items");
+  status.className = "status";
+  status.textContent = "Loading your reading list…";
+  const result = await listApi("");
+  if (!result.ok) {
+    status.className = "message error";
+    status.textContent = listErrorText(result, "load your reading list");
+    return;
+  }
+  const items = result.body.items;
+  savedDois.clear();
+  items.forEach((item) => savedDois.add(item.doi));
+  list.replaceChildren(...items.map(renderReadingListItem));
+  status.textContent = items.length
+    ? `${items.length} saved paper${items.length === 1 ? "" : "s"}.`
+    : "No saved papers yet. Use \u201cSave to reading list\u201d on a recommendation.";
+  refreshSaveButtons();
 }
 
 // ---- trace ---------------------------------------------------------------------------------
@@ -332,4 +475,5 @@ async function onSubmit(event) {
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("ask-form").addEventListener("submit", onSubmit);
   checkHealth();
+  loadReadingList();
 });

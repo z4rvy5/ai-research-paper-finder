@@ -10,7 +10,9 @@ filtering / de-duplication / ordering, a model call that writes explanations, an
 grounding checks. The response carries 3-5 papers and an inspectable trace, and the browser
 renders both. Obvious requests to invent papers are refused by a deterministic pre-check
 before any model or Crossref call, and a failed Crossref search still returns a safe trace.
-**Not built yet:** reading-list persistence, rate limiting, retries/caching, and deployment.
+**Milestone 4 added a persistent reading list** (save, list, remove) in Postgres (SQLite
+locally), scoped by an anonymous per-browser id (§1b). **Not built yet:** rate limiting,
+retries/caching, the final README/DESIGN/AI_USAGE/VERIFICATION documents, and deployment.
 
 ---
 
@@ -79,22 +81,86 @@ Step by step, with the function that does each thing:
     `on_search_failed` in `main.py` turns it into the response.
 12. **Render.** `renderResults` in `app.js` draws paper cards and the trace with `textContent`.
 
+## 1b. Request flow: the reading list (M4)
+
+```
+Browser (app.js)                    app/main.py                      boundaries
+────────────────                    ───────────                      ──────────
+getClientId()  random UUID in localStorage, sent as X-Client-Id on every call
+loadReadingList()  GET /api/reading-list ─▶ client_id_header()  400 if missing / not a UUID
+                                           repo.list_papers(client_id)  ─────▶ SQL (parameterized)
+toggleSaved()  POST /api/reading-list {doi} ▶ SavePaperRequest  (DOI only; extra fields → 422)
+                                           repo.get()  already saved? → 200, done
+                                           recent_papers.get(doi)   a paper WE just recommended
+                                             └ miss → crossref.get_work(doi) ───▶ GET /works/{doi}
+                                                  404 → 404 doi_not_found; failure → 502/503
+                                           repo.add()  → 201 (new)  ─────────────▶ INSERT
+              DELETE /api/reading-list/{doi} ▶ normalize_doi → repo.remove() → 204 / 404 not_saved
+```
+
+1. **Identification.** On first load the browser makes a random UUID (`getClientId` in `app.js`),
+   keeps it in `localStorage`, and sends it as `X-Client-Id`. `main.client_id_header` requires a
+   valid UUID (`400 missing_client_id` / `invalid_client_id`) and canonicalizes it to lowercase.
+   **This is browser-level separation, not authentication or authorization.** The id is a random
+   value the browser chose; anyone who has it can read and change that list, a different
+   browser can't see it, and clearing site data loses it. Saved lists are not private accounts.
+   What is stored is public bibliographic metadata only.
+2. **Save takes only a DOI** (`SavePaperRequest`, `extra="forbid"`). The server decides what to
+   store, so a client can never save a title, author list or link of its own choosing. The DOI is
+   normalized by `schemas.normalize_doi` (trim, drop a `https://doi.org/` or `doi:` prefix,
+   lowercase, `10.NNNN/suffix`, at most 255 characters, no whitespace or control characters).
+3. **Where the metadata comes from.** First `PaperCache` (`app/storage/paper_cache.py`): a small
+   in-process cache of the papers `/api/ask` just recommended (256 entries, 1 hour), filled only
+   from server-produced Crossref data. On a miss, `CrossrefClient.get_work` calls
+   `GET /works/{doi}`. Either way the stored record is normalized Crossref data, never client
+   or model text. A DOI Crossref doesn't know is `404 doi_not_found`.
+4. **Persistence.** `ReadingListRepo` (`app/storage/reading_list.py`), SQLAlchemy Core, one table:
+   `saved_papers(client_id, doi, title, authors, year, venue, url, abstract, work_type,
+   missing_fields, saved_at)`.
+   - Primary key `(client_id, doi)`: one row per paper per list, enforced by the database.
+   - Index on `(client_id, saved_at)` for listing. `authors` and `missing_fields` are JSON text
+     (portable across SQLite and Postgres); `title`, `year`, `venue` and `abstract` are nullable so
+     missing data stays missing; `saved_at` is a timezone-aware UTC timestamp.
+   - Every query is built with SQLAlchemy expressions (bound parameters). There is no SQL string
+     concatenation anywhere.
+   - `add` is idempotent: it checks, inserts, and treats a lost race (`IntegrityError`) as "already
+     saved". Saving twice is `200` and returns the original row; the first save is `201`.
+5. **Choosing the database.** `DATABASE_URL`: SQLite (`sqlite:///./data/app.db`, the default) or
+   Postgres. `normalize_database_url` maps the `postgres://` / `postgresql://` URLs Neon and Render
+   hand out to the psycopg 3 driver. Postgres engines use `pool_pre_ping` (Neon suspends idle
+   databases and drops their connections), `pool_recycle=240` and a 10 s connect timeout. SQLite
+   gets its directory created and `check_same_thread=False` (FastAPI runs the sync repository calls
+   in worker threads via `run_in_threadpool`).
+6. **Database failure.** Any `SQLAlchemyError` becomes `StorageError`: `503 storage_unavailable`,
+   `retryable: true`, a fixed message. Driver text (which can contain hosts, user names and
+   passwords) is never logged or returned; only the exception class is logged. The table is
+   created on startup, and if the database is down then, the app still starts (`/api/ask` works)
+   and creation is retried on the next use. `GET /api/health` reports `db: "ok"` or
+   `"unavailable"` and stays `200`.
+7. **UI.** Every card and every saved item has one button that saves or removes. After each
+   change the list is reloaded from the server and all buttons are refreshed from it (the server
+   is the source of truth). The list shows loading, empty and error states; save/remove errors
+   appear next to the button. A removal that comes back `not_saved` is treated as already done.
+
 ## 2. File and function map
 
 | File | Key contents |
 |---|---|
-| `app/main.py` | `create_app(settings, crossref, model, clock)`: the app factory. Builds the `Orchestrator`; `ask()` is one line. `error_response(..., trace=None)` builds the error body and adds `trace` only when given. Error handlers: validation (422), `SearchFailed` (502/503, with the trace), `CrossrefError` (502/503), and a catch-all (500 `internal_error`) so a bug returns the error envelope instead of breaking the page. |
-| `app/schemas.py` | Every contract in one place: `AskRequest`; `Paper` and `RecommendedPaper(Paper)`; the model-boundary types `SearchPlan`, `WorkType`, `Explanations`, `ExplanationItem`, `Candidate`; the trace types `Trace`, `TraceStep`, `Interpretation`, `Counts`, `FilteringInfo`, `GroundingInfo`, `SearchInfo`, `Failure`; `AskResponse`; and `ErrorResponse` (whose optional `trace` is set only for upstream failures). |
+| `app/main.py` | `create_app(settings, crossref, model, clock)`: the app factory. Builds the `Orchestrator`, the `ReadingListRepo` and the `PaperCache`; `ask()` is short. The reading-list endpoints and `client_id_header` live here too. `error_response(..., trace=None)` builds the error body and adds `trace` only when given. Error handlers: validation (422), `SearchFailed` (502/503, with the trace), `CrossrefError` (502/503), and a catch-all (500 `internal_error`) so a bug returns the error envelope instead of breaking the page. |
+| `app/schemas.py` | Every contract in one place: `AskRequest`; `Paper` and `RecommendedPaper(Paper)`; the model-boundary types `SearchPlan`, `WorkType`, `Explanations`, `ExplanationItem`, `Candidate`; the trace types `Trace`, `TraceStep`, `Interpretation`, `Counts`, `FilteringInfo`, `GroundingInfo`, `SearchInfo`, `Failure`; `AskResponse`; `ErrorResponse` (whose optional `trace` is set only for upstream failures); and the reading-list types `SavePaperRequest`, `SavedPaper`, `ReadingListResponse`, plus `normalize_doi`. |
 | `app/agent/orchestrator.py` | `Orchestrator.ask`: fixed control flow (no loop). `_precheck_refusal`, `_interpret`, `_search`, `_search_failed`, `_refine`, `_explain`, `_response`. `SearchFailed` is the exception that carries a failed primary search's error and trace. `_Run` accumulates the trace for one request. |
 | `app/agent/llm.py` | The model boundary. `ModelClient` (Protocol: `interpret`, `explain`, `aclose`), `ModelError` (stable `code`), `AnthropicModelClient`. Timeout and retry constants live here. |
 | `app/agent/prompts.py` | System prompts, `escape()` for untrusted text, and the two user-message builders. |
 | `app/agent/plan.py` | `fabrication_request_reason` (the pre-check), `sanitize_query`, `topic_terms`, `fallback_plan`, `effective_plan`, `SEARCH_ROWS`, the stopword list. |
 | `app/agent/ranking.py` | `select_papers` (pure), `term_match`, `stem`, `Selection`, `PRESENT_LIMIT = 5`, `WINDOW = 12`. |
 | `app/agent/grounding.py` | `to_candidate`, `violations`, `fallback_explanation`, `ground_explanations`. |
-| `app/crossref/client.py` | M2 client; `search_works`/`PaperSearch` gained optional `from_year`, `until_year`, `types`. `build_filter` builds the `filter=` value. |
+| `app/crossref/client.py` | M2 client; `search_works`/`PaperSearch` gained optional `from_year`, `until_year`, `types`. `build_filter` builds the `filter=` value. `get_work(doi)` is the single-record lookup (`GET /works/{doi}`; a 404 is `None`). |
 | `app/crossref/normalize.py` | `normalize_work(s)`, `abstract_text` (JATS → text), `strip_markup`. |
 | `app/static/app.js` | `renderResults`, `renderPaper`, `renderTrace`. Everything is built with `textContent`. |
-| `tests/fakes.py` | `FakeCrossrefClient` (records calls, scripted responses) and `FakeModelClient` (scripted plan/explanations or errors). |
+| `app/storage/reading_list.py` | `ReadingListRepo` (`get`, `add`, `list_papers`, `remove`, `ensure_schema`, `ping`, `dispose`), the `saved_papers` table, `make_engine`, `normalize_database_url`, `StorageError`. |
+| `app/storage/paper_cache.py` | `PaperCache`: a bounded, expiring in-process cache of recently recommended papers. |
+| `app/errors.py` | `ApiError(status, code, message)`: request errors that map onto the error envelope. |
+| `tests/fakes.py` | `failing_repo()` (a repository whose database fails instantly with a secret-laden driver message), `FakeCrossrefClient` (now with `get_work`) (records calls, scripted responses) and `FakeModelClient` (scripted plan/explanations or errors). |
 | `tests/builders.py` | `work()` builds Crossref-shaped records, plus `search_result`, `fixture_result`, `many_works`, `mock_crossref_client`. |
 
 ## 3. Model vs deterministic boundary
@@ -203,6 +269,10 @@ risk; the output bounds above are what actually limit the damage.
   window (3 years) and records it as an assumption in the trace.
 - **Crossref contact address: User-Agent only** (from M2). The trace and logs can't contain it.
   `trace.searches[].url` has no address; `Trace.model` is a model id, never a credential.
+- **Persistence: SQLAlchemy Core, one table, portable types.** Same code on SQLite (tests, local)
+  and Neon Postgres (production). No migrations: the table is created if missing.
+- **Reading-list reads and writes never involve a model.** The model boundary and the reading list
+  don't touch.
 - **Refinement is bounded.** At most one extra Crossref search, only when fewer than 3 papers
   survive and the plan has an alternative query.
 
@@ -222,12 +292,19 @@ risk; the output bounds above are what actually limit the damage.
 | No Crossref records, or all filtered out | `status: no_results`, no explanation call, reasons in the trace | `Orchestrator.ask` |
 | Missing abstract / authors / year | Explicit placeholders and `missing_fields`; evidence basis "title only" | `normalize_work`, `renderPaper` |
 | Model explanation overclaims / cites / adds a paper | Replaced or ignored, recorded in `trace.grounding`; `degraded` | `ground_explanations` |
+| Reading list: missing / malformed `X-Client-Id` | 400 `missing_client_id` / `invalid_client_id` | `client_id_header` |
+| Reading list: invalid DOI or extra fields in the body | 422 `invalid_input`; nothing looked up or saved | `SavePaperRequest`, `normalize_doi` |
+| Save: Crossref has no such DOI | 404 `doi_not_found`; nothing saved | `save_paper` |
+| Save: Crossref failure during the lookup | 503 / 502 with the usual Crossref error body (no trace); nothing saved | `on_crossref_error` |
+| Save: already saved | 200 with the original row; no lookup | `save_paper`, `repo.get` |
+| Remove: not in this client's list | 404 `not_saved` | `remove_paper` |
+| Database unavailable (list / save / remove) | 503 `storage_unavailable`, retryable, no connection details; `/api/ask` unaffected; `/api/health` says `db: unavailable` | `StorageError`, `on_storage_error` |
 | Unexpected server bug | 500 `internal_error` envelope; details logged server-side only | `on_unexpected_error` |
 
 ## 7. Tests
 
 ```bash
-uv run pytest                                   # all tests (248)
+uv run pytest                                   # all tests (349)
 uv run pytest tests/test_workflow.py            # the end-to-end scenarios
 uv run pytest "tests/test_grounding.py::test_overclaiming_explanation_is_replaced_by_a_deterministic_one_and_recorded"
 uv run ruff check . && uv run ruff format --check .
@@ -247,7 +324,10 @@ over `httpx2.MockTransport`; the model with `FakeModelClient`, or the real
 | `test_normalize_metadata.py` (16) | Authors (placeholders, organizations), partial dates, JATS → text, entity/DOCTYPE safety, truncation, `missing_fields` |
 | `test_prompts.py` (5) | Hostile text can't close or forge tags; the explanation call sees only title/year/venue/abstract |
 | `test_api_ask.py` (22) | HTTP contract and compatibility, 422s (no trace), Crossref error envelopes (same `error`, plus a trace), the 500 catch-all, shutdown, and the contact-address / credential privacy tests |
-| `test_crossref_client.py` (23), `test_capture_fixtures.py` (10), `test_normalize.py` (6), `test_app.py` (7) | M1/M2 behavior, unchanged (`test_app.py` gained a blank-API-key health check) |
+| `test_reading_list_api.py` (60) | The reading-list HTTP API: save from a just-recommended paper (no second Crossref call) and by Crossref lookup; clients can't supply metadata; unknown DOI 404; duplicate save 200; DOI normalization and case; 10 invalid payloads; Crossref failures while saving; missing and injection-like metadata; newest-first list; remove 204/404, encoded and slash-containing DOIs; the `X-Client-Id` requirement on all three endpoints; separate lists per client; **persistence across an application restart** (file database, three app lifetimes); database failure → 503 with no connection details in the response or logs, while `/api/ask` keeps working; health `db` state; the exact response contract |
+| `test_reading_list_repo.py` (24) | The repository on SQLite: round trip with unicode, missing data stays missing, idempotent add, ordering, UTC timestamps, client separation, restart, SQL-looking text stored as data, the composite primary key and index, database-enforced uniqueness, URL mapping for Neon, and failure handling with a driver error full of secrets (never logged or returned), plus schema-creation retry |
+| `test_paper_cache.py` (6) | Only Crossref fields cached, independent copies, TTL expiry, eviction order |
+| `test_crossref_client.py` (34), `test_capture_fixtures.py` (10), `test_normalize.py` (6), `test_app.py` (7) | M1/M2 behavior, plus `get_work` (record, 404 as not found, path encoding, error mapping, malformed responses). `test_app.py`'s health test now expects `db: "ok"` (it was a placeholder until M4) |
 
 ## 8. Why deterministic orchestration instead of an autonomous tool-using agent?
 
@@ -274,7 +354,7 @@ deterministic refusal of obvious requests to invent papers.
   times. For a 3-5 paper recommendation with an auditable trace, one bounded refinement is
   enough, and the assignment allows deterministic orchestration.
 
-## 9. Known limitations (as of M3)
+## 9. Known limitations (as of M4)
 
 - **Relevance quality.** Crossref's search is lexical. A relevant paper that uses different words
   can rank low, and the 12-paper window means it may never be considered. The soft term guard and
@@ -297,5 +377,13 @@ deterministic refusal of obvious requests to invent papers.
 - **Failure traces are minimal.** A failed primary search reports the plan, the failing step, and
   fixed-text failure fields, but not Crossref's rate-limit headers (the client raises before
   reading them) and not any partial work, because there isn't any.
-- **Reading list, deployment and the remaining documents** (README, DESIGN, AI_USAGE,
-  VERIFICATION) are not built yet.
+- **The reading list is not private.** `X-Client-Id` is browser-level separation only; anyone who
+  has an id can read and change that list, and clearing site data loses the browser's access.
+  There are no accounts, no export, and no way to recover a lost id.
+- **Postgres is exercised only through SQLite in automated tests.** The SQL is portable and the
+  failure path is tested, but the real Neon connection is verified only by the manual deployment
+  smoke test. The tests deliberately never contact a database server.
+- **The recent-recommendations cache is per process.** After a restart (or on a second instance) a
+  save falls back to a Crossref `/works/{doi}` lookup, which adds one request.
+- **Deployment and the remaining documents** (README, DESIGN, AI_USAGE, VERIFICATION) are not
+  built yet.

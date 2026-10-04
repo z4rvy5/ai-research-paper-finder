@@ -15,7 +15,8 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 def make_settings(**overrides) -> Settings:
     """Settings isolated from the developer's environment and `.env` file."""
-    defaults = {"anthropic_api_key": None, "crossref_mailto": None}
+    # An in-memory database by default, so no test ever creates or reads a real database file.
+    defaults = {"anthropic_api_key": None, "crossref_mailto": None, "database_url": "sqlite://"}
     return Settings(_env_file=None, **{**defaults, **overrides})
 
 
