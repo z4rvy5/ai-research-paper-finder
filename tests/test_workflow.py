@@ -693,6 +693,8 @@ def test_primary_crossref_failure_keeps_the_error_contract_and_adds_a_trace(erro
         "http_status": error.status,
         "query": "large language models software testing",
         "filters": {"from_year": 2022, "until_year": 2024, "types": ["journal-article"]},
+        "rate_limit": None,  # the fake error carries no Crossref headers
+        "retries": 0,
     }
     assert trace["interpretation"]["source"] == "model"
     assert trace["interpretation"]["plan"]["from_year"] == 2022
@@ -750,3 +752,53 @@ def test_failure_trace_exposes_no_secrets_contact_address_or_raw_upstream_text(
     lowered = res.text.lower()
     assert "user-agent" not in lowered and "mailto" not in lowered and "api_key" not in lowered
     assert "https://" not in res.text  # no request URL in a failure trace
+
+
+# --- Retries are visible in the trace -------------------------------------------------------------
+
+THROTTLE_HEADERS = {
+    "x-api-pool": "polite-array",
+    "x-rate-limit-limit": "3",
+    "x-rate-limit-interval": "1s",
+    "x-concurrency-limit": "3",
+}
+
+
+def first_throttled_then_ok(request):
+    first_call = "seen" not in first_throttled_then_ok.__dict__
+    first_throttled_then_ok.__dict__["seen"] = True
+    if first_call:
+        return httpx2.Response(429, headers=THROTTLE_HEADERS, text="slow down")
+    body = load_crossref_fixture("works_llm_software_testing")
+    return httpx2.Response(200, json=body["body"], headers=body["headers"])
+
+
+def test_a_retried_search_succeeds_and_the_trace_says_it_was_retried():
+    first_throttled_then_ok.__dict__.pop("seen", None)
+    crossref, seen = mock_crossref_client(None, first_throttled_then_ok)
+
+    res, _, _ = ask(crossref=crossref)
+
+    body = res.json()
+    assert res.status_code == 200 and body["status"] == "ok" and len(seen) == 2
+    assert body["trace"]["searches"][0]["retries"] == 1
+    assert body["search"]["retries"] == 1
+
+
+def test_a_failed_search_trace_shows_crossrefs_rate_limit_headers_and_the_retry():
+    crossref, seen = mock_crossref_client(
+        None, lambda request: httpx2.Response(429, headers=THROTTLE_HEADERS, text="slow down")
+    )
+
+    res, _, _ = ask(crossref=crossref)
+
+    assert res.status_code == 503 and len(seen) == 2  # one retry, then the clear error
+    failure = res.json()["trace"]["failure"]
+    assert failure["http_status"] == 429 and failure["retries"] == 1
+    assert failure["rate_limit"] == {
+        "pool": "polite-array",
+        "limit": 3,
+        "interval": "1s",
+        "concurrency": 3,
+    }
+    assert "slow down" not in res.text  # Crossref's raw response text is never shown

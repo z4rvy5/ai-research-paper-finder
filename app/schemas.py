@@ -202,6 +202,7 @@ class SearchInfo(BaseModel):
     total_results: int
     returned: int
     rate_limit: RateLimitInfo
+    retries: int = 0  # transient Crossref failures retried before this request succeeded
 
 
 class TraceStep(BaseModel):
@@ -265,6 +266,8 @@ class Failure(BaseModel):
     http_status: int | None  # Crossref's status when it answered; None for network failures
     query: str  # the search terms that were being sent
     filters: dict[str, Any] = {}  # from_year, until_year, types
+    rate_limit: RateLimitInfo | None = None  # Crossref's rate-limit headers, when it answered
+    retries: int = 0  # retries used before giving up
 
 
 class Trace(BaseModel):

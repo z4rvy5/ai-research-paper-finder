@@ -4,6 +4,7 @@ Run locally with:  uv run uvicorn app.main:create_app --factory --reload
 """
 
 import logging
+import math
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -15,13 +16,16 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.agent.budget import BudgetedModelClient
 from app.agent.llm import AnthropicModelClient, ModelClient
 from app.agent.orchestrator import Orchestrator, SearchFailed
 from app.config import Settings
 from app.crossref.client import CrossrefClient, CrossrefError, PaperSearch
 from app.crossref.normalize import normalize_work
 from app.errors import ApiError
+from app.limits import DailyCallBudget, SlidingWindowLimiter
 from app.schemas import (
     AskRequest,
     AskResponse,
@@ -58,15 +62,47 @@ READING_LIST_ERRORS = {
 }
 
 
+# Applied to every response. The page has no inline scripts or styles, so a strict policy works.
+# (The interactive API docs at /docs load scripts from a CDN, so they are exempt from the CSP.)
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+}
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+)
+
+
 def error_response(
-    status: int, code: str, message: str, retryable: bool, trace: Trace | None = None
+    status: int,
+    code: str,
+    message: str,
+    retryable: bool,
+    trace: Trace | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """The error envelope. `trace` is added only when there is one; otherwise the body is
     exactly `{"error": {...}}`, as before."""
     body: dict[str, object] = {"error": {"code": code, "message": message, "retryable": retryable}}
     if trace is not None:
         body["trace"] = trace.model_dump(mode="json")
-    return JSONResponse(status_code=status, content=body)
+    return JSONResponse(status_code=status, content=body, headers=headers)
+
+
+def client_address(request: Request) -> str:
+    """The address used to rate-limit a client.
+
+    Behind a proxy (Render) the TCP peer is the proxy, so the forwarding header is used, taking its
+    LAST entry: that is the one our own proxy appended, which a client cannot forge (anything a
+    client puts in the header comes earlier in the list). If more than one proxy sits in front,
+    clients may share an address and so share a limit, which errs on the side of limiting.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    last = forwarded.split(",")[-1].strip()
+    if last:
+        return last
+    return request.client.host if request.client else "unknown"
 
 
 def client_id_header(x_client_id: str | None = Header(default=None)) -> str:
@@ -93,7 +129,11 @@ def create_app(
     """Build the app. Tests pass explicit settings and fake Crossref/model clients and a repo."""
     settings = settings or Settings()
     crossref = crossref or CrossrefClient(settings.crossref_mailto)
-    model = model or AnthropicModelClient(settings)
+    # Every model call spends from a daily budget; once it is gone the app uses its fallbacks.
+    model = BudgetedModelClient(
+        model or AnthropicModelClient(settings), DailyCallBudget(settings.max_daily_model_calls)
+    )
+    ask_limiter = SlidingWindowLimiter(settings.ask_rate_limit_per_minute, 60.0)
     repo = repo or ReadingListRepo(make_engine(settings.database_url))
     orchestrator = Orchestrator(
         model=model, crossref=crossref, model_name=settings.anthropic_model, clock=clock
@@ -115,6 +155,40 @@ def create_app(
     app = FastAPI(title="AI Research Paper Finder", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
 
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        if not request.url.path.startswith(("/docs", "/redoc")):
+            response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        return response
+
+    async def limit_asks(request: Request) -> None:
+        wait = ask_limiter.check(client_address(request))
+        if wait is not None:
+            seconds = max(1, math.ceil(wait))
+            raise ApiError(
+                429,
+                "rate_limited",
+                f"Too many questions in a short time. Please wait about {seconds} seconds.",
+                retryable=True,
+                headers={"Retry-After": str(seconds)},
+            )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def on_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        """Unknown routes and methods use the same error envelope as everything else."""
+        known = {
+            404: ("not_found", "Not found."),
+            405: ("method_not_allowed", "That method is not allowed here."),
+        }
+        code, message = known.get(
+            exc.status_code, ("http_error", "The request could not be handled.")
+        )
+        headers = dict(exc.headers) if exc.headers else None
+        return error_response(exc.status_code, code, message, False, headers=headers)
+
     @app.exception_handler(RequestValidationError)
     async def on_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         first = exc.errors()[0] if exc.errors() else {}
@@ -123,7 +197,7 @@ def create_app(
 
     @app.exception_handler(ApiError)
     async def on_api_error(request: Request, exc: ApiError) -> JSONResponse:
-        return error_response(exc.status, exc.code, exc.message, exc.retryable)
+        return error_response(exc.status, exc.code, exc.message, exc.retryable, headers=exc.headers)
 
     @app.exception_handler(StorageError)
     async def on_storage_error(request: Request, exc: StorageError) -> JSONResponse:
@@ -159,8 +233,10 @@ def create_app(
     @app.post(
         "/api/ask",
         response_model=AskResponse,
+        dependencies=[Depends(limit_asks)],
         responses={
             422: {"model": ErrorResponse},
+            429: {"model": ErrorResponse},
             500: {"model": ErrorResponse},
             502: {"model": ErrorResponse},
             503: {"model": ErrorResponse},

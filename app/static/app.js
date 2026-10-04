@@ -36,13 +36,29 @@ function getClientId() {
   }
 }
 
+// fetch() that gives up after `ms` milliseconds, so a stalled server never leaves the page waiting.
+async function fetchWithTimeout(url, options, ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const ASK_TIMEOUT_MS = 150000; // the server itself can take up to about a minute (two model calls)
+const LIST_TIMEOUT_MS = 30000;
+const HEALTH_TIMEOUT_MS = 15000;
+
 // Reading-list requests never throw: they resolve to { ok, status, body }.
 async function listApi(path, options = {}) {
   try {
-    const res = await fetch(`/api/reading-list${path}`, {
-      ...options,
-      headers: { "X-Client-Id": getClientId(), "Content-Type": "application/json" },
-    });
+    const res = await fetchWithTimeout(
+      `/api/reading-list${path}`,
+      { ...options, headers: { "X-Client-Id": getClientId(), "Content-Type": "application/json" } },
+      LIST_TIMEOUT_MS,
+    );
     let body = null;
     if (res.status !== 204) {
       try {
@@ -86,7 +102,7 @@ function showMessage(container, text, kind) {
 async function checkHealth() {
   const el = document.getElementById("server-status");
   try {
-    const res = await fetch("/api/health");
+    const res = await fetchWithTimeout("/api/health", {}, HEALTH_TIMEOUT_MS);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const health = await res.json();
     const missing = [];
@@ -244,7 +260,10 @@ async function loadReadingList() {
   const result = await listApi("");
   if (!result.ok) {
     status.className = "message error";
-    status.textContent = listErrorText(result, "load your reading list");
+    const retry = h("button", "retry-button", "Try again");
+    retry.type = "button";
+    retry.addEventListener("click", loadReadingList);
+    status.replaceChildren(listErrorText(result, "load your reading list"), " ", retry);
     return;
   }
   const items = result.body.items;
@@ -276,7 +295,7 @@ function describePlan(plan) {
   return parts;
 }
 
-function renderTrace(trace) {
+function renderTrace(trace, papers = []) {
   const details = h("details", "trace");
   details.appendChild(h("summary", "", "Agent trace: how this answer was produced"));
 
@@ -315,8 +334,12 @@ function renderTrace(trace) {
         "Failure",
         bulletList([
           `${f.stage} failed: ${f.code}${f.http_status ? ` (HTTP ${f.http_status})` : " (no response)"}`,
-          `${f.message}${f.retryable ? " This may work if you try again shortly." : ""}`,
+          `${f.message}${f.retryable && !/try again|wait/i.test(f.message) ? " This may work if you try again shortly." : ""}`,
           `search terms: "${f.query}"${filters.length ? ` [${filters.join("; ")}]` : ""}`,
+          ...(f.retries ? [`Crossref was retried ${f.retries} time${f.retries === 1 ? "" : "s"} before giving up.`] : []),
+          ...(f.rate_limit?.pool
+            ? [`Crossref reported pool ${f.rate_limit.pool}${f.rate_limit.limit ? `, limit ${f.rate_limit.limit} per ${f.rate_limit.interval ?? "interval"}` : ""}.`]
+            : []),
         ]),
       ),
     );
@@ -354,9 +377,10 @@ function renderTrace(trace) {
               f.types.length ? `types ${f.types.join(", ")}` : "",
             ].filter(Boolean);
             const pool = s.rate_limit.pool ? `, pool ${s.rate_limit.pool}` : "";
+            const retried = s.retries ? `, after ${s.retries} retry` : "";
             return (
               `${s.purpose}: "${s.query}" ${filters.length ? `[${filters.join("; ")}] ` : ""}` +
-              `rows=${s.rows} → HTTP ${s.http_status}, ${s.returned} of ${s.total_results.toLocaleString()} matches${pool}`
+              `rows=${s.rows} → HTTP ${s.http_status}, ${s.returned} of ${s.total_results.toLocaleString()} matches${pool}${retried}`
             );
           }),
         ),
@@ -379,6 +403,24 @@ function renderTrace(trace) {
     );
   }
   details.appendChild(traceSection("Filtering and ordering", ...filteringNodes));
+
+  if (fl.shortlisted.length) {
+    const titles = new Map(papers.map((paper) => [paper.doi, paper.title]));
+    details.appendChild(
+      traceSection(
+        "Selected papers",
+        bulletList(
+          fl.shortlisted.map(
+            (entry) =>
+              `${entry.ref}: ${titles.get(entry.doi) ?? "(no title in Crossref record)"} (${entry.doi}) — ` +
+              (entry.term_match
+                ? "matches a query term"
+                : "no query-term match (kept: a relevant paper can use different wording)"),
+          ),
+        ),
+      ),
+    );
+  }
 
   const g = trace.grounding;
   const groundingNodes = [];
@@ -432,7 +474,7 @@ function renderResults(container, body) {
       traceSection("Limitations and uncertainty", bulletList(body.limitations)),
     );
   }
-  container.appendChild(renderTrace(body.trace));
+  container.appendChild(renderTrace(body.trace, body.papers));
 }
 
 async function onSubmit(event) {
@@ -444,16 +486,16 @@ async function onSubmit(event) {
   button.disabled = true;
   showMessage(results, "Interpreting your question and searching Crossref… this can take a little while.", "info");
   try {
-    const res = await fetch("/api/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
-    });
+    const res = await fetchWithTimeout(
+      "/api/ask",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) },
+      ASK_TIMEOUT_MS,
+    );
     const body = await res.json();
     if (!res.ok) {
       const error = body.error;
       const hint =
-        error?.retryable && !/try again/i.test(error.message) ? " You can try again shortly." : "";
+        error?.retryable && !/try again|wait/i.test(error.message) ? " You can try again shortly." : "";
       showMessage(results, `${error?.message ?? `Request failed (HTTP ${res.status}).`}${hint}`, "error");
       if (body.trace) {
         // An upstream failure after the request was understood: show what was attempted.
@@ -466,7 +508,13 @@ async function onSubmit(event) {
     }
     renderResults(results, body);
   } catch (err) {
-    showMessage(results, "Could not reach the server. Please try again.", "error");
+    showMessage(
+      results,
+      err.name === "AbortError"
+        ? "The request took too long, so the browser stopped waiting. The server may be waking up; please try again."
+        : "Could not reach the server. Please try again.",
+      "error",
+    );
   } finally {
     button.disabled = false;
   }

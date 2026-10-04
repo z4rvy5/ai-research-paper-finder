@@ -84,4 +84,8 @@ def mock_crossref_client(mailto: str | None = None, respond=None):
             return respond(request)
         return httpx2.Response(200, json=fixture["body"], headers=fixture["headers"])
 
-    return CrossrefClient(mailto, transport=httpx2.MockTransport(handler)), seen
+    async def no_sleep(seconds: float) -> None:  # retries must not really wait in tests
+        return None
+
+    client = CrossrefClient(mailto, transport=httpx2.MockTransport(handler), sleep=no_sleep)
+    return client, seen

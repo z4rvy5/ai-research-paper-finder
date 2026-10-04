@@ -22,7 +22,14 @@ def mock_client(handler, mailto: str | None = MAILTO) -> tuple[CrossrefClient, l
         seen.append(request)
         return handler(request)
 
-    return CrossrefClient(mailto, transport=httpx2.MockTransport(record)), seen
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:  # record the pause instead of waiting
+        sleeps.append(seconds)
+
+    client = CrossrefClient(mailto, transport=httpx2.MockTransport(record), sleep=fake_sleep)
+    client.sleeps = sleeps  # tests can assert on the pauses the retry logic asked for
+    return client, seen
 
 
 def fixture_response(name: str = "works_llm_software_testing"):
@@ -324,3 +331,148 @@ async def test_get_work_network_failure_is_unavailable():
         await client.get_work("10.1000/abc")
 
     assert exc_info.value.code == "upstream_unavailable" and exc_info.value.retryable
+
+
+# --- One bounded retry for transient failures ----------------------------------------------------
+
+
+def sequence(*responses):
+    """A handler returning (or raising) each outcome in turn; the last one repeats."""
+    outcomes = list(responses)
+
+    def handler(request):
+        outcome = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    return handler
+
+
+def ok_response():
+    body = load_crossref_fixture("works_llm_software_testing")["body"]
+    return httpx2.Response(200, json=body, headers={"x-api-pool": "polite-array"})
+
+
+RATE_HEADERS = {
+    "x-api-pool": "polite-array",
+    "x-rate-limit-limit": "3",
+    "x-rate-limit-interval": "1s",
+}
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        httpx2.Response(429, headers=RATE_HEADERS),
+        httpx2.Response(500),
+        httpx2.Response(502),
+        httpx2.Response(503),
+        httpx2.Response(504),
+    ],
+    ids=["429", "500", "502", "503", "504"],
+)
+async def test_a_transient_http_failure_is_retried_once_and_the_retry_is_reported(first):
+    client, seen = mock_client(sequence(first, ok_response()))
+
+    result = await client.search_works("software testing")
+
+    assert len(seen) == 2 and result.retries == 1 and result.http_status == 200
+    assert client.sleeps == [1.0]  # a short default pause
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx2.ReadTimeout("slow"), httpx2.ConnectTimeout("slow"), httpx2.ConnectError("no route")],
+    ids=["read-timeout", "connect-timeout", "connect-error"],
+)
+async def test_timeouts_and_network_errors_are_retried_once(failure):
+    client, seen = mock_client(sequence(failure, ok_response()))
+
+    result = await client.search_works("software testing")
+
+    assert len(seen) == 2 and result.retries == 1
+
+
+async def test_a_clean_first_attempt_reports_no_retries_and_never_sleeps():
+    client, seen = mock_client(sequence(ok_response()))
+
+    result = await client.search_works("software testing")
+
+    assert len(seen) == 1 and result.retries == 0 and client.sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_pause"),
+    [
+        ("2", 2.0),
+        ("0", 0.0),
+        ("30", 2.0),
+        ("-5", 0.0),
+        ("soon", 1.0),
+        ("Wed, 21 Oct 2026 07:28:00 GMT", 1.0),
+    ],
+)
+async def test_retry_after_is_honoured_but_capped(retry_after, expected_pause):
+    throttled = httpx2.Response(429, headers={"retry-after": retry_after})
+    client, _ = mock_client(sequence(throttled, ok_response()))
+
+    await client.search_works("software testing")
+
+    assert client.sleeps == [expected_pause]
+
+
+async def test_two_rate_limit_responses_stop_after_one_retry_and_report_crossrefs_limits():
+    client, seen = mock_client(sequence(httpx2.Response(429, headers=RATE_HEADERS)))
+
+    with pytest.raises(CrossrefError) as exc_info:
+        await client.search_works("software testing")
+
+    error = exc_info.value
+    assert len(seen) == 2  # exactly one retry, never a loop
+    assert (error.code, error.status, error.retries) == ("upstream_rate_limited", 429, 1)
+    assert error.rate_limit.pool == "polite-array"
+    assert (error.rate_limit.limit, error.rate_limit.interval) == (3, "1s")
+
+
+async def test_repeated_server_errors_are_reported_after_one_retry():
+    client, seen = mock_client(sequence(httpx2.Response(500), httpx2.Response(503)))
+
+    with pytest.raises(CrossrefError) as exc_info:
+        await client.search_works("software testing")
+
+    assert len(seen) == 2 and exc_info.value.code == "upstream_unavailable"
+    assert exc_info.value.status == 503 and exc_info.value.retries == 1
+
+
+async def test_repeated_timeouts_are_reported_after_one_retry():
+    client, seen = mock_client(sequence(httpx2.ReadTimeout("slow")))
+
+    with pytest.raises(CrossrefError) as exc_info:
+        await client.search_works("software testing")
+
+    assert len(seen) == 2 and exc_info.value.retries == 1
+    assert exc_info.value.code == "upstream_unavailable" and exc_info.value.status is None
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(400, "upstream_rejected"), (403, "upstream_error"), (404, "upstream_error")],
+)
+async def test_client_errors_are_never_retried(status, code):
+    client, seen = mock_client(sequence(httpx2.Response(status, text="no")))
+
+    with pytest.raises(CrossrefError) as exc_info:
+        await client.search_works("software testing")
+
+    assert len(seen) == 1 and exc_info.value.code == code and client.sleeps == []
+
+
+async def test_get_work_retries_transient_failures_too_but_not_a_404():
+    record = {"DOI": "10.1000/abc"}
+    ok = httpx2.Response(200, json={"status": "ok", "message": record})
+    client, seen = mock_client(sequence(httpx2.Response(429), ok))
+    assert await client.get_work("10.1000/abc") == record and len(seen) == 2
+
+    client, seen = mock_client(sequence(httpx2.Response(404, text="Resource not found.")))
+    assert await client.get_work("10.9/none") is None and len(seen) == 1

@@ -236,6 +236,7 @@ class Orchestrator:
                 total_results=result.total_results,
                 returned=len(result.items),
                 rate_limit=result.rate_limit,
+                retries=result.retries,
             )
         )
         papers = normalize_works(result.items, rank_offset)
@@ -355,6 +356,8 @@ class Orchestrator:
                 http_status=exc.status,
                 query=plan.topic_query,
                 filters=self._filters(plan),
+                rate_limit=exc.rate_limit,
+                retries=exc.retries,
             ),
         )
         return SearchFailed(exc, trace)

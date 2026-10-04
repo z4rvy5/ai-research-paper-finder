@@ -20,7 +20,12 @@ class Settings(BaseSettings):
     crossref_mailto: str | None = None
 
     database_url: str = "sqlite:///./data/app.db"
+    # Cost and abuse limits for a public demo (in-memory, per process; see app/limits.py).
+    # When the daily model-call cap is reached the app keeps answering with its deterministic
+    # fallbacks instead of calling the model. 0 means "never call the model".
     max_daily_model_calls: int = 500
+    # Questions per client address per minute; 0 disables the limit.
+    ask_rate_limit_per_minute: int = 20
 
     @property
     def model_api_key(self) -> str | None:

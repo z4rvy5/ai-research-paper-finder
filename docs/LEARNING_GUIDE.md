@@ -11,8 +11,11 @@ grounding checks. The response carries 3-5 papers and an inspectable trace, and 
 renders both. Obvious requests to invent papers are refused by a deterministic pre-check
 before any model or Crossref call, and a failed Crossref search still returns a safe trace.
 **Milestone 4 added a persistent reading list** (save, list, remove) in Postgres (SQLite
-locally), scoped by an anonymous per-browser id (§1b). **Not built yet:** rate limiting,
-retries/caching, the final README/DESIGN/AI_USAGE/VERIFICATION documents, and deployment.
+locally), scoped by an anonymous per-browser id (§1b). **Milestone 5 completed the user-facing
+workflow and its resilience:** one bounded Crossref retry, a per-client rate limit and a daily
+model-call cap (§1c), security headers, a consistent error shape, and a UI that shows every
+state. **Not built yet:** the final README/DESIGN/AI_USAGE/VERIFICATION documents and
+deployment.
 
 ---
 
@@ -142,6 +145,52 @@ toggleSaved()  POST /api/reading-list {doi} ▶ SavePaperRequest  (DOI only; ext
    is the source of truth). The list shows loading, empty and error states; save/remove errors
    appear next to the button. A removal that comes back `not_saved` is treated as already done.
 
+## 1c. Resilience and public-demo protections (M5)
+
+**Crossref retry (`CrossrefClient._get`).** A transient failure is retried **once**: HTTP 429,
+any 5xx, a timeout, or a connection error. The pause is Crossref's `Retry-After` when it is a
+number, otherwise 1 s, and never more than 2 s (`_retry_delay`, `RETRY_MAX_DELAY_S`). 400, 404 and
+other 4xx are never retried. A second failure is reported, not retried again, so a single request
+makes at most two Crossref calls. The pause is an injected `sleep`, so tests never wait. The
+number of retries used appears in the trace (`searches[].retries`, `failure.retries`), and a failed
+request's `failure.rate_limit` carries Crossref's own `x-api-pool` / `x-rate-limit-*` headers
+(Crossref documents them as authoritative; we record them rather than guess).
+
+**Per-client rate limit (`app/limits.py`, `main.limit_asks`).** `POST /api/ask` allows
+`ASK_RATE_LIMIT_PER_MINUTE` (default 20) questions per client address per minute, using a
+sliding window held in memory. Over the limit: `429 rate_limited`, `retryable: true`, a
+`Retry-After` header, and no model or Crossref work. Invalid questions count too. `0` disables it.
+The address is the **last** entry of `X-Forwarded-For` (`main.client_address`): that entry is the
+one our own proxy appended, which a client cannot forge, because anything a client sends is
+earlier in the list (a test proves a forged prefix does not bypass the limit). If several proxies
+sit in front, clients can share an address and so share a limit, which errs on the side of limiting.
+
+**Daily model-call cap (`app/agent/budget.py`).** Every model call spends from a per-UTC-day
+budget (`MAX_DAILY_MODEL_CALLS`, default 500). When it is gone, `BudgetedModelClient` raises
+`ModelError("model_daily_limit")` and the orchestrator's existing fallbacks take over: the
+answer is still returned, `degraded`, with `interpret: model_daily_limit` in the trace. The demo
+degrades instead of failing or running up cost. `0` never calls the model.
+
+Both limits live in memory, per process. They reset on restart and are not shared between
+instances, which is the right size for a single free-tier demo and the wrong tool for anything
+bigger.
+
+**Security headers (`main.add_security_headers`).** Every response carries
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, and a
+strict Content-Security-Policy (`default-src 'self'; base-uri 'none'; form-action 'self';
+frame-ancestors 'none'`). The page works under it because it has no inline scripts, inline
+styles, event-handler attributes or CDN assets (a test parses the HTML and scans `app.js` to keep
+it that way). The interactive `/docs` page loads scripts from a CDN, so only it is exempt from
+the CSP.
+
+**One error shape.** Unknown routes (404) and wrong methods (405, `Allow` header kept) also use
+`{"error": {code, message, retryable}}` (`on_http_exception`).
+
+**Browser resilience (`app.js`).** Requests use `fetchWithTimeout` (question 150 s, because a
+cold start plus two model calls can take about a minute; reading list 30 s; health 15 s), so a
+stalled server never leaves the page waiting forever. A failed reading-list load shows a
+**Try again** button; save/remove failures appear beside the button and leave it usable.
+
 ## 2. File and function map
 
 | File | Key contents |
@@ -154,11 +203,13 @@ toggleSaved()  POST /api/reading-list {doi} ▶ SavePaperRequest  (DOI only; ext
 | `app/agent/plan.py` | `fabrication_request_reason` (the pre-check), `sanitize_query`, `topic_terms`, `fallback_plan`, `effective_plan`, `SEARCH_ROWS`, the stopword list. |
 | `app/agent/ranking.py` | `select_papers` (pure), `term_match`, `stem`, `Selection`, `PRESENT_LIMIT = 5`, `WINDOW = 12`. |
 | `app/agent/grounding.py` | `to_candidate`, `violations`, `fallback_explanation`, `ground_explanations`. |
-| `app/crossref/client.py` | M2 client; `search_works`/`PaperSearch` gained optional `from_year`, `until_year`, `types`. `build_filter` builds the `filter=` value. `get_work(doi)` is the single-record lookup (`GET /works/{doi}`; a 404 is `None`). |
+| `app/crossref/client.py` | M2 client; `search_works`/`PaperSearch` gained optional `from_year`, `until_year`, `types`. `build_filter` builds the `filter=` value. `get_work(doi)` is the single-record lookup (`GET /works/{doi}`; a 404 is `None`). `_get` does the one bounded retry; `CrossrefError` now carries Crossref's `rate_limit` headers and the `retries` used. |
 | `app/crossref/normalize.py` | `normalize_work(s)`, `abstract_text` (JATS → text), `strip_markup`. |
 | `app/static/app.js` | `renderResults`, `renderPaper`, `renderTrace`. Everything is built with `textContent`. |
 | `app/storage/reading_list.py` | `ReadingListRepo` (`get`, `add`, `list_papers`, `remove`, `ensure_schema`, `ping`, `dispose`), the `saved_papers` table, `make_engine`, `normalize_database_url`, `StorageError`. |
 | `app/storage/paper_cache.py` | `PaperCache`: a bounded, expiring in-process cache of recently recommended papers. |
+| `app/limits.py` | `SlidingWindowLimiter` (per-key, bounded memory) and `DailyCallBudget`. |
+| `app/agent/budget.py` | `BudgetedModelClient`: wraps any `ModelClient` and spends from a `DailyCallBudget`. |
 | `app/errors.py` | `ApiError(status, code, message)`: request errors that map onto the error envelope. |
 | `tests/fakes.py` | `failing_repo()` (a repository whose database fails instantly with a secret-laden driver message), `FakeCrossrefClient` (now with `get_work`) (records calls, scripted responses) and `FakeModelClient` (scripted plan/explanations or errors). |
 | `tests/builders.py` | `work()` builds Crossref-shaped records, plus `search_result`, `fixture_result`, `many_works`, `mock_crossref_client`. |
@@ -292,6 +343,11 @@ risk; the output bounds above are what actually limit the damage.
 | No Crossref records, or all filtered out | `status: no_results`, no explanation call, reasons in the trace | `Orchestrator.ask` |
 | Missing abstract / authors / year | Explicit placeholders and `missing_fields`; evidence basis "title only" | `normalize_work`, `renderPaper` |
 | Model explanation overclaims / cites / adds a paper | Replaced or ignored, recorded in `trace.grounding`; `degraded` | `ground_explanations` |
+| Crossref 429 / 5xx / timeout / connection error | Retried once (Retry-After honored, capped at 2 s); success after a retry is `ok` with `retries: 1` in the trace; a second failure is the 503 / 502 error with the failure trace | `CrossrefClient._get` |
+| More than `ASK_RATE_LIMIT_PER_MINUTE` questions from one address | 429 `rate_limited` with `Retry-After`; no model or Crossref call | `limit_asks`, `SlidingWindowLimiter` |
+| Daily model-call cap reached | Answer continues using fallbacks, `degraded`, `interpret/explain: model_daily_limit` in the trace | `BudgetedModelClient` |
+| Unknown route / wrong method | 404 `not_found` / 405 `method_not_allowed` in the standard envelope | `on_http_exception` |
+| Browser request takes too long | Aborted after the timeout with a message that the server may be waking up | `fetchWithTimeout` |
 | Reading list: missing / malformed `X-Client-Id` | 400 `missing_client_id` / `invalid_client_id` | `client_id_header` |
 | Reading list: invalid DOI or extra fields in the body | 422 `invalid_input`; nothing looked up or saved | `SavePaperRequest`, `normalize_doi` |
 | Save: Crossref has no such DOI | 404 `doi_not_found`; nothing saved | `save_paper` |
@@ -304,7 +360,7 @@ risk; the output bounds above are what actually limit the damage.
 ## 7. Tests
 
 ```bash
-uv run pytest                                   # all tests (349)
+uv run pytest                                   # all tests (409)
 uv run pytest tests/test_workflow.py            # the end-to-end scenarios
 uv run pytest "tests/test_grounding.py::test_overclaiming_explanation_is_replaced_by_a_deterministic_one_and_recorded"
 uv run ruff check . && uv run ruff format --check .
@@ -316,7 +372,7 @@ over `httpx2.MockTransport`; the model with `FakeModelClient`, or the real
 
 | File (tests) | Proves |
 |---|---|
-| `test_workflow.py` (53) | The whole pipeline through `POST /api/ask`: question → plan → Crossref fixture → selection → explanations; date and work-type constraints (the exact call arguments, and the deterministic re-check); missing abstract and authors; no results; Crossref 429/5xx and a failed refinement; model timeout/failure/malformed output (interpret, explain, both); a plan with hostile values; the model adding a paper, citing a DOI, overclaiming, or obeying an injected abstract; the question trying to cancel the search; every bibliographic field equal to the Crossref record; the trace's stages, counts, filters and rules; no secrets or contact address anywhere in the response. **Pre-check:** invention requests never reach the model or Crossref (also with the model down), the refusal's trace, and legitimate fabrication-topic questions still run. **Failure trace:** 429, 5xx, network and 400 keep the error contract and add the trace; a model fallback before the failure is recorded; no key, contact address, request URL or raw upstream text appears |
+| `test_workflow.py` (55) | The whole pipeline through `POST /api/ask`: question → plan → Crossref fixture → selection → explanations; date and work-type constraints (the exact call arguments, and the deterministic re-check); missing abstract and authors; no results; Crossref 429/5xx and a failed refinement; model timeout/failure/malformed output (interpret, explain, both); a plan with hostile values; a retried search reported in the trace, a failed search's rate-limit headers and retry count; the model adding a paper, citing a DOI, overclaiming, or obeying an injected abstract; the question trying to cancel the search; every bibliographic field equal to the Crossref record; the trace's stages, counts, filters and rules; no secrets or contact address anywhere in the response. **Pre-check:** invention requests never reach the model or Crossref (also with the model down), the refusal's trace, and legitimate fabrication-topic questions still run. **Failure trace:** 429, 5xx, network and 400 keep the error contract and add the trace; a model fallback before the failure is recorded; no key, contact address, request URL or raw upstream text appears |
 | `test_grounding.py` (25) | Each lint rule, slot validation (unknown, duplicate, missing refs), fallback text, evidence basis, and that bibliographic fields come from the record |
 | `test_llm.py` (20) | What is sent to the API (model, explicit effort, structured output, no forced tools, escaped input); every SDK failure → its `ModelError` code; refusal/truncation/wrong-type responses; no credentials in errors or logs; a blank key counts as not configured |
 | `test_ranking.py` (18) | Each hard constraint with its reason; de-duplication (same DOI, preprint vs published, far-apart years); the soft guard; ordering; the 12-paper window and 5-paper limit; the real fixture's duplicate pair |
@@ -327,7 +383,9 @@ over `httpx2.MockTransport`; the model with `FakeModelClient`, or the real
 | `test_reading_list_api.py` (60) | The reading-list HTTP API: save from a just-recommended paper (no second Crossref call) and by Crossref lookup; clients can't supply metadata; unknown DOI 404; duplicate save 200; DOI normalization and case; 10 invalid payloads; Crossref failures while saving; missing and injection-like metadata; newest-first list; remove 204/404, encoded and slash-containing DOIs; the `X-Client-Id` requirement on all three endpoints; separate lists per client; **persistence across an application restart** (file database, three app lifetimes); database failure → 503 with no connection details in the response or logs, while `/api/ask` keeps working; health `db` state; the exact response contract |
 | `test_reading_list_repo.py` (24) | The repository on SQLite: round trip with unicode, missing data stays missing, idempotent add, ordering, UTC timestamps, client separation, restart, SQL-looking text stored as data, the composite primary key and index, database-enforced uniqueness, URL mapping for Neon, and failure handling with a driver error full of secrets (never logged or returned), plus schema-creation retry |
 | `test_paper_cache.py` (6) | Only Crossref fields cached, independent copies, TTL expiry, eviction order |
-| `test_crossref_client.py` (34), `test_capture_fixtures.py` (10), `test_normalize.py` (6), `test_app.py` (7) | M1/M2 behavior, plus `get_work` (record, 404 as not found, path encoding, error mapping, malformed responses). `test_app.py`'s health test now expects `db: "ok"` (it was a placeholder until M4) |
+| `test_security.py` (22) | Headers on every kind of response; the CSP's shape; the page has nothing a strict CSP would block; `app.js` never assigns markup or inline styles; `/docs` exemption; the 404/405 envelope; the ask rate limit (429, `Retry-After`, no work done, per-address buckets, a forged `X-Forwarded-For` prefix does not bypass it, invalid questions count, other endpoints unaffected, `0` disables it); the daily cap degrades to fallbacks and never calls the model again |
+| `test_limits.py` (14) | The sliding window (limit, wait time, expiry, key independence, bounded memory), the daily budget (limit, next-day reset, zero), and the model wrapper |
+| `test_crossref_client.py` (56), `test_capture_fixtures.py` (10), `test_normalize.py` (6), `test_app.py` (7) | M1/M2 behavior, plus `get_work` (record, 404 as not found, path encoding, error mapping, malformed responses) and the retry policy (each transient status and network error retried once, `Retry-After` honored and capped, exactly one retry, no retry for 4xx, rate-limit headers captured on failure). `test_app.py`'s health test now expects `db: "ok"` (it was a placeholder until M4) |
 
 ## 8. Why deterministic orchestration instead of an autonomous tool-using agent?
 
@@ -354,7 +412,7 @@ deterministic refusal of obvious requests to invent papers.
   times. For a 3-5 paper recommendation with an auditable trace, one bounded refinement is
   enough, and the assignment allows deterministic orchestration.
 
-## 9. Known limitations (as of M4)
+## 9. Known limitations (as of M5)
 
 - **Relevance quality.** Crossref's search is lexical. A relevant paper that uses different words
   can rank low, and the 12-paper window means it may never be considered. The soft term guard and
@@ -371,12 +429,20 @@ deterministic refusal of obvious requests to invent papers.
   online before print.
 - **Abstracts.** Many Crossref records have none (4 of the 5 in the captured fixture), and the
   ones that do are truncated to 1,500 characters and may be publisher-copyrighted.
-- **No rate limiting or retries on our side yet** (Crossref's per-pool limits are recorded in the
-  trace but not enforced), and no per-IP or daily cap on model calls, so a public deployment
-  needs the resilience milestone first.
-- **Failure traces are minimal.** A failed primary search reports the plan, the failing step, and
-  fixed-text failure fields, but not Crossref's rate-limit headers (the client raises before
-  reading them) and not any partial work, because there isn't any.
+- **Crossref's pool limits are recorded, not enforced.** There is one bounded retry and a polite
+  Retry-After pause, but no client-side pacing or per-pool limiter. At demo scale (a few
+  reviewers, two Crossref calls per question) Crossref's limits are not expected to be reached;
+  if they are, the user sees a clear 503 with the failure trace.
+- **The rate limit and the daily cap are in memory and per process.** They reset when the server
+  restarts and are not shared across instances. The per-client key is the last
+  `X-Forwarded-For` entry, which can group users behind a shared proxy.
+- **Failure traces are minimal.** A failed primary search reports the plan, the failing step,
+  fixed-text failure fields, the retry count and Crossref's rate-limit headers when it answered,
+  but no partial work, because there isn't any.
+- **The UI is verified manually, not by automated browser tests.** There is no JavaScript test
+  framework (a deliberate choice: no Node toolchain). The rendering rules (text only, DOI-derived
+  links only) are enforced by static checks in `test_security.py`, and the states are checked in
+  the manual procedure.
 - **The reading list is not private.** `X-Client-Id` is browser-level separation only; anyone who
   has an id can read and change that list, and clearing site data loses the browser's access.
   There are no accounts, no export, and no way to recover a lost id.
