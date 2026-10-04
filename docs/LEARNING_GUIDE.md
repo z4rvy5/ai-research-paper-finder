@@ -14,8 +14,10 @@ before any model or Crossref call, and a failed Crossref search still returns a 
 locally), scoped by an anonymous per-browser id (§1b). **Milestone 5 completed the user-facing
 workflow and its resilience:** one bounded Crossref retry, a per-client rate limit and a daily
 model-call cap (§1c), security headers, a consistent error shape, and a UI that shows every
-state. **Not built yet:** the final README/DESIGN/AI_USAGE/VERIFICATION documents and
-deployment.
+state. **Milestone 6 added the submission documents** (`README.md`, `DESIGN.md`, `AI_USAGE.md`,
+`VERIFICATION.md`), the Render Blueprint (`render.yaml`), a deployment smoke-test script, and a
+database-backend check in `/api/health` (§1d). **Not done:** the public deployment itself (it needs
+the owner's Render and Neon accounts), and a real Anthropic call (all automated tests mock the model).
 
 ---
 
@@ -191,6 +193,28 @@ cold start plus two model calls can take about a minute; reading list 30 s; heal
 stalled server never leaves the page waiting forever. A failed reading-list load shows a
 **Try again** button; save/remove failures appear beside the button and leave it usable.
 
+## 1d. Deployment support (M6)
+
+- **`render.yaml`** is a Render Blueprint for a free Python web service: build
+  `pip install uv && uv sync --frozen --no-dev` (installs exactly what `uv.lock` pins, without
+  dev packages), start `uv run --no-dev --frozen uvicorn app.main:create_app --factory --host
+  0.0.0.0 --port $PORT`, health check `/api/health`. The Python version comes from
+  `.python-version`. Secrets (`ANTHROPIC_API_KEY`, `DATABASE_URL`, optional `CROSSREF_MAILTO`) are
+  `sync: false`: Render asks for them in its dashboard and they are never in the repository. The
+  build was verified locally in a clean copy; it has not yet run on Render.
+- **A silent-failure guard.** If `DATABASE_URL` is missing, the app would use a SQLite file, and
+  Render's disk is ephemeral, so every reading list would vanish on restart. Two defenses:
+  `/api/health` reports `db_backend` (`"postgresql"` or `"sqlite"`), which
+  `smoke_test.py --expect-postgres` checks, and `create_app`'s startup hook logs a loud warning
+  when the `RENDER` environment variable is set and the database is SQLite.
+- **`scripts/smoke_test.py`** exercises a *running* deployment over HTTP exactly as a browser
+  would, with no credentials: health, headers, a real recommendation, the invention refusal,
+  validation, the full reading-list round trip with two client ids, and a scan of every response
+  for secret-looking text. `--expect-model` makes it the live-Anthropic smoke test. It is covered
+  by `tests/test_smoke_script.py`, which runs it against the in-process app (and checks that it
+  fails when it should), and it was run against a real local server with live Crossref.
+- **`scripts/run_tests_offline.py`** runs the suite with every non-loopback connection blocked.
+
 ## 2. File and function map
 
 | File | Key contents |
@@ -210,6 +234,8 @@ stalled server never leaves the page waiting forever. A failed reading-list load
 | `app/storage/paper_cache.py` | `PaperCache`: a bounded, expiring in-process cache of recently recommended papers. |
 | `app/limits.py` | `SlidingWindowLimiter` (per-key, bounded memory) and `DailyCallBudget`. |
 | `app/agent/budget.py` | `BudgetedModelClient`: wraps any `ModelClient` and spends from a `DailyCallBudget`. |
+| `scripts/smoke_test.py`, `scripts/run_tests_offline.py` | Manual deployment smoke test (live) and the network-blocked test runner (§1d). |
+| `render.yaml` | The Render Blueprint (§1d). |
 | `app/errors.py` | `ApiError(status, code, message)`: request errors that map onto the error envelope. |
 | `tests/fakes.py` | `failing_repo()` (a repository whose database fails instantly with a secret-laden driver message), `FakeCrossrefClient` (now with `get_work`) (records calls, scripted responses) and `FakeModelClient` (scripted plan/explanations or errors). |
 | `tests/builders.py` | `work()` builds Crossref-shaped records, plus `search_result`, `fixture_result`, `many_works`, `mock_crossref_client`. |
@@ -360,7 +386,7 @@ risk; the output bounds above are what actually limit the damage.
 ## 7. Tests
 
 ```bash
-uv run pytest                                   # all tests (409)
+uv run pytest                                   # all tests (420)
 uv run pytest tests/test_workflow.py            # the end-to-end scenarios
 uv run pytest "tests/test_grounding.py::test_overclaiming_explanation_is_replaced_by_a_deterministic_one_and_recorded"
 uv run ruff check . && uv run ruff format --check .
@@ -380,8 +406,9 @@ over `httpx2.MockTransport`; the model with `FakeModelClient`, or the real
 | `test_normalize_metadata.py` (16) | Authors (placeholders, organizations), partial dates, JATS → text, entity/DOCTYPE safety, truncation, `missing_fields` |
 | `test_prompts.py` (5) | Hostile text can't close or forge tags; the explanation call sees only title/year/venue/abstract |
 | `test_api_ask.py` (22) | HTTP contract and compatibility, 422s (no trace), Crossref error envelopes (same `error`, plus a trace), the 500 catch-all, shutdown, and the contact-address / credential privacy tests |
-| `test_reading_list_api.py` (60) | The reading-list HTTP API: save from a just-recommended paper (no second Crossref call) and by Crossref lookup; clients can't supply metadata; unknown DOI 404; duplicate save 200; DOI normalization and case; 10 invalid payloads; Crossref failures while saving; missing and injection-like metadata; newest-first list; remove 204/404, encoded and slash-containing DOIs; the `X-Client-Id` requirement on all three endpoints; separate lists per client; **persistence across an application restart** (file database, three app lifetimes); database failure → 503 with no connection details in the response or logs, while `/api/ask` keeps working; health `db` state; the exact response contract |
+| `test_reading_list_api.py` (63) | The reading-list HTTP API: save from a just-recommended paper (no second Crossref call) and by Crossref lookup; clients can't supply metadata; unknown DOI 404; duplicate save 200; DOI normalization and case; 10 invalid payloads; Crossref failures while saving; missing and injection-like metadata; newest-first list; remove 204/404, encoded and slash-containing DOIs; the `X-Client-Id` requirement on all three endpoints; separate lists per client; **persistence across an application restart** (file database, three app lifetimes); database failure → 503 with no connection details in the response or logs, while `/api/ask` keeps working; health `db` state; the exact response contract; `/api/health`'s `db_backend` and the Render ephemeral-SQLite warning |
 | `test_reading_list_repo.py` (24) | The repository on SQLite: round trip with unicode, missing data stays missing, idempotent add, ordering, UTC timestamps, client separation, restart, SQL-looking text stored as data, the composite primary key and index, database-enforced uniqueness, URL mapping for Neon, and failure handling with a driver error full of secrets (never logged or returned), plus schema-creation retry |
+| `test_smoke_script.py` (8) | The deployment smoke script, offline: passes on a healthy app, fails on a missing model (`--expect-model`), SQLite (`--expect-postgres`), a broken database, secret-looking response text, an unreachable service and an empty result |
 | `test_paper_cache.py` (6) | Only Crossref fields cached, independent copies, TTL expiry, eviction order |
 | `test_security.py` (22) | Headers on every kind of response; the CSP's shape; the page has nothing a strict CSP would block; `app.js` never assigns markup or inline styles; `/docs` exemption; the 404/405 envelope; the ask rate limit (429, `Retry-After`, no work done, per-address buckets, a forged `X-Forwarded-For` prefix does not bypass it, invalid questions count, other endpoints unaffected, `0` disables it); the daily cap degrades to fallbacks and never calls the model again |
 | `test_limits.py` (14) | The sliding window (limit, wait time, expiry, key independence, bounded memory), the daily budget (limit, next-day reset, zero), and the model wrapper |
@@ -412,7 +439,7 @@ deterministic refusal of obvious requests to invent papers.
   times. For a 3-5 paper recommendation with an auditable trace, one bounded refinement is
   enough, and the assignment allows deterministic orchestration.
 
-## 9. Known limitations (as of M5)
+## 9. Known limitations (as of M6)
 
 - **Relevance quality.** Crossref's search is lexical. A relevant paper that uses different words
   can rank low, and the 12-paper window means it may never be considered. The soft term guard and
@@ -451,5 +478,9 @@ deterministic refusal of obvious requests to invent papers.
   smoke test. The tests deliberately never contact a database server.
 - **The recent-recommendations cache is per process.** After a restart (or on a second instance) a
   save falls back to a Crossref `/works/{doi}` lookup, which adds one request.
-- **Deployment and the remaining documents** (README, DESIGN, AI_USAGE, VERIFICATION) are not
-  built yet.
+- **Not yet deployed.** The Blueprint and smoke test are ready, but a Render service and a Neon
+  database need the owner's accounts; until then the README's live URL is a placeholder and the
+  deployment evidence in `VERIFICATION.md` is marked as not yet recorded.
+- **A real Anthropic call has not been made.** The prompts, structured-output schemas, real latency
+  and real refusals are verified only against mocks; `smoke_test.py --expect-model` is the planned
+  manual check.

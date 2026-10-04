@@ -5,6 +5,7 @@ Run locally with:  uv run uvicorn app.main:create_app --factory --reload
 
 import logging
 import math
+import os
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -142,6 +143,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if os.environ.get("RENDER") and repo.backend == "sqlite":
+            # Render's disk is ephemeral: a SQLite file would silently lose every reading list.
+            log.warning(
+                "DATABASE_URL is not a Postgres database on Render: reading lists will NOT "
+                "survive a restart or redeploy. Set DATABASE_URL to the Neon connection string."
+            )
         try:
             await run_in_threadpool(repo.ensure_schema)
         except StorageError:
@@ -226,6 +233,7 @@ def create_app(
         return HealthResponse(
             status="ok",  # the process is up; `db` says whether the database answered
             db="ok" if database_ok else "unavailable",
+            db_backend="postgresql" if repo.backend.startswith("postgres") else "sqlite",
             model_configured=settings.model_api_key is not None,
             crossref_mailto_configured=bool(settings.crossref_mailto),
         )

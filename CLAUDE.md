@@ -4,21 +4,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status and commands
 
-Under construction, following a milestone-based architecture plan. The stack is Python 3.12 (managed with `uv`), FastAPI, and a vanilla HTML/JS frontend in `app/static/`. Hosting is Render free tier with Neon Postgres. `assignment.pdf` is the source of truth for requirements.
+Implemented milestones: Crossref search boundary, model-assisted workflow, persistent reading list, complete UX and resilience, and the submission documents (`README.md`, `DESIGN.md`, `AI_USAGE.md`, `VERIFICATION.md`). **Not yet done:** the public deployment (needs the owner's Render and Neon accounts), the live URL in the README, and a real Anthropic call (every automated test mocks the model). The stack is Python 3.12 (managed with `uv`), FastAPI, SQLAlchemy Core (SQLite locally, Neon Postgres in production), the Anthropic SDK, and a vanilla HTML/JS frontend in `app/static/`. Hosting is Render free tier with Neon Postgres (`render.yaml`). `assignment.pdf` is the source of truth for requirements.
 
 ```bash
 uv sync                                                   # install dependencies
-uv run uvicorn app.main:create_app --factory --reload     # run locally on :8000
-uv run pytest                                             # all tests
-uv run pytest tests/test_app.py::test_index_page_is_served  # single test
+uv run uvicorn app.main:create_app --factory --reload     # run locally on :8000 (works without any keys)
+uv run pytest                                             # all tests (offline, mocked boundaries)
+uv run pytest tests/test_workflow.py::test_question_flows_through_plan_search_selection_and_explanations  # single test
 uv run ruff check . && uv run ruff format --check .       # lint and format check
+uv run python scripts/run_tests_offline.py                # the suite with all external network blocked
+uv run python scripts/smoke_test.py <url> [--expect-model] [--expect-postgres]   # LIVE smoke test of a running deployment
 ```
 
-Copy `.env.example` to `.env` for local configuration. Tests build settings with `make_settings()` (`tests/conftest.py`), which ignores `.env`.
+Copy `.env.example` to `.env` for local configuration. Tests build settings with `make_settings()` (`tests/conftest.py`), which ignores `.env` and uses an in-memory database.
 
-`docs/LEARNING_GUIDE.md` explains the actual request flow, files and functions, the boundary between model and deterministic code, failure modes and tests. **Update it at the end of every milestone** so it describes only code that exists.
+`docs/LEARNING_GUIDE.md` explains the actual request flow, files and functions, the boundary between model and deterministic code, failure modes and tests. **Update it whenever behaviour changes** so it describes only code that exists.
 
 To read the brief, run `pdftotext -layout assignment.pdf -`. The Read tool can't render PDFs here because poppler's `pdftoppm` is not installed.
+
+## Architecture in one paragraph
+
+`app/main.py` builds the app (`create_app`) and wires three boundaries that tests replace with fakes: `PaperSearch` (Crossref, `app/crossref/client.py`), `ModelClient` (Anthropic, `app/agent/llm.py`), and `ReadingListRepo` (`app/storage/reading_list.py`). `app/agent/orchestrator.py` runs a fixed pipeline (fabrication pre-check, interpret, search, filter/dedupe/order, explain, grounding checks); it is deliberately not an agent loop. The model never produces bibliographic data: it returns a bounded `SearchPlan` and explanation text keyed by slot refs, and every shown field comes from the normalized Crossref record. See `DESIGN.md`.
+
+## Rules that are easy to break
+
+- **Contact address:** `CROSSREF_MAILTO` is optional and goes only in the `User-Agent` header, never in a URL, trace, error or log. Never use a person's account identity for it.
+- **No live services in automated tests.** Mock Crossref and the model; use SQLite. `scripts/smoke_test.py` and `scripts/capture_fixtures.py` are manual and live.
+- **Grounding:** never let model output become bibliographic metadata, a link, or the choice of papers.
+- **Rendering:** the UI uses `textContent` only (a test enforces it, and enforces CSP compatibility). No `innerHTML`.
+- **Heredoc pitfall for editing:** shell heredocs can corrupt backslashes in regexes; use the Write/Edit tools for such files.
 
 ## What is being built
 

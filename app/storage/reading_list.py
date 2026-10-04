@@ -197,6 +197,11 @@ class ReadingListRepo:
     def dispose(self) -> None:
         self._engine.dispose()
 
+    @property
+    def backend(self) -> str:
+        """ "sqlite" or "postgresql": which database this repository is using."""
+        return self._engine.dialect.name
+
     # ---- internals ----------------------------------------------------------------------------
 
     def _ping(self) -> None:

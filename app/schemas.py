@@ -302,6 +302,9 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     # "not_checked" until the reading-list database is wired in.
     db: Literal["ok", "unavailable", "not_checked"]
+    # Which database is configured. A deployment check can confirm it is "postgresql" and not a
+    # throwaway SQLite file on an ephemeral disk.
+    db_backend: Literal["sqlite", "postgresql"]
     model_configured: bool
     crossref_mailto_configured: bool
 

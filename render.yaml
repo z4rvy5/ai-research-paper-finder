@@ -1,0 +1,37 @@
+# Render Blueprint for the AI Research Paper Finder (free web service).
+#
+# Secrets are NOT in this file: `sync: false` makes Render ask for them in its dashboard when the
+# Blueprint is created. Fields follow https://render.com/docs/blueprint-spec.
+#
+# The reading list needs a real database. Create a free Neon Postgres project and paste its
+# connection string as DATABASE_URL; without it the app would fall back to a SQLite file on
+# Render's ephemeral disk and lose every reading list on restart (the app logs a warning and
+# /api/health reports "db_backend": "sqlite" if that happens).
+services:
+  - type: web
+    name: ai-research-paper-finder
+    runtime: python
+    plan: free
+    # The Python version comes from .python-version (3.12), which Render honours.
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: uv run --no-dev --frozen uvicorn app.main:create_app --factory --host 0.0.0.0 --port $PORT
+    # Returns 200 whenever the process is up; the "db" field says whether the database answers.
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      # --- secrets, entered in the Render dashboard (never committed) ---
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DATABASE_URL # Neon connection string, e.g. postgresql://USER:PASSWORD@HOST/DB?sslmode=require
+        sync: false
+      - key: CROSSREF_MAILTO # optional contact address; sent only in the User-Agent. Leave empty to send none.
+        sync: false
+      # --- non-secret configuration ---
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-5-5
+      - key: ANTHROPIC_EFFORT
+        value: low
+      - key: MAX_DAILY_MODEL_CALLS # cost cap; after it, answers use the deterministic fallbacks
+        value: "300"
+      - key: ASK_RATE_LIMIT_PER_MINUTE
+        value: "20"

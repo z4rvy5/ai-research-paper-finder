@@ -472,3 +472,32 @@ def test_the_error_envelope_is_used_for_every_reading_list_error():
             "message",
             "retryable",
         }
+
+
+# --- Deployment safety: which database is this? ---------------------------------------------------
+
+
+def test_health_reports_which_database_backend_is_configured():
+    assert make_client().get("/api/health").json()["db_backend"] == "sqlite"
+    assert make_client(repo=failing_repo()).get("/api/health").json()["db_backend"] == "postgresql"
+
+
+def test_running_on_render_with_sqlite_logs_a_loud_warning(monkeypatch, caplog):
+    monkeypatch.setenv("RENDER", "true")  # Render sets this variable on its services
+
+    with caplog.at_level(logging.WARNING), make_client():
+        pass
+
+    assert "will NOT survive a restart" in caplog.text
+
+
+def test_no_warning_with_postgres_on_render_or_with_sqlite_elsewhere(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING):
+        monkeypatch.setenv("RENDER", "true")
+        with make_client(repo=failing_repo()):
+            pass
+        monkeypatch.delenv("RENDER")
+        with make_client():
+            pass
+
+    assert "will NOT survive a restart" not in caplog.text
