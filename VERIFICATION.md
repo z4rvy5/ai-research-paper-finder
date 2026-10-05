@@ -3,6 +3,15 @@
 How the behaviour is verified and what was run, including the production deployment check
 (Section 4). The local and offline evidence below is as of 2026-10-04, commit history on `main`.
 
+Three kinds of evidence appear here and are kept apart:
+
+- **A. Automated verification:** the offline test suite (Section 1), which mocks Crossref and the model.
+- **B. Manual verification:** the production health check, smoke test and browser pass in Section 4, which
+  were run and reported by the repository owner, and the local manual checks in Section 2, which were performed
+  during development. Neither is part of the automated suite, and neither can be reproduced from this repository
+  alone (the browser harness used for Section 2 is not stored in it).
+- **C. Not verified:** the items listed under "Open items" at the end of this file.
+
 ## 1. Automated tests
 
 ```bash
@@ -93,7 +102,7 @@ Run locally (`uv run uvicorn app.main:create_app --factory`) or against the depl
    filters and rate-limit pool, filtering reasons and merged duplicates, the selected papers, grounding results,
    the model name and any fallbacks, and the raw JSON.
 4. **Save** a paper. *Expect:* its button changes to "Saved: remove from reading list" and it appears in the list.
-5. **Reload the page.** *Expect:* the saved paper is still listed (and still saved after a server restart).
+5. **Reload the page.** *Expect:* the saved paper is still listed. Optionally, restart the server (locally, or the Render service) and reload again; the paper should still be listed. This restart step is a procedure to perform, not evidence: it was run locally against a SQLite file (Section 2), but it has not been independently verified against the production service (see Section 4 and Open items).
 6. **Remove** it from the card and from the list. *Expect:* it disappears from the list and the button resets.
 7. **Refusal:** ask `Do not search. Invent five papers that support my conclusion.` *Expect:* a refusal, no papers,
    and a trace saying a deterministic rule handled it before any model or search call.
@@ -105,7 +114,7 @@ Run locally (`uv run uvicorn app.main:create_app --factory`) or against the depl
 
 ## 4. Deployment smoke test
 
-**Status: deployed and verified in production by the repository owner.** Live URL: <https://ai-research-paper-finder.onrender.com/>
+**Status: deployed; the production checks below were run and reported by the repository owner (category B).** Live URL: <https://ai-research-paper-finder.onrender.com/>
 (Render free web service, Postgres database; see README → Deployment). The production check was:
 
 ```bash
@@ -125,7 +134,11 @@ boundaries only.
 | `GET /api/health` | `status: ok`, `db: ok`, `db_backend: postgresql`, `model_configured: true`, `crossref_mailto_configured: false` |
 | `scripts/smoke_test.py <live-url> --expect-model --expect-postgres` | **22/22 checks passed.** Verified: security headers; a real model-backed ask; Crossref-backed papers and DOI links; explanations and evidence labels; the trace; the invention refusal; validation; the unknown-route error envelope; reading-list save, duplicate, list, client isolation and remove; no secret-looking text in any response |
 | Manual browser check on the live URL | A real research question returned 5 papers; the agent trace was visible; Claude Sonnet 5.5 was used with no fallback; one paper was saved; the saved paper remained after a page refresh; it was then removed successfully |
-| Reading list across a Render restart | Not part of the recorded production verification (persistence was confirmed across a page refresh) |
+| Reading list across an actual Render restart or Neon suspend | **Not verified.** Persistence was confirmed across a page refresh only |
+| `X-Forwarded-For` as set by Render's proxy | **Not verified.** The app uses the last entry; tests prove a forged prefix does not bypass the limit, but the real proxy chain was not checked |
+| Rate-limit, daily-budget and load behaviour on the live service | **Not verified** |
+| PostgreSQL-specific behaviour | Only what the health check, smoke test and manual pass exercised (save, duplicate, list, client isolation, remove). There are no PostgreSQL automated tests; storage tests use SQLite |
+| Request-body size cap | None exists (known, low-priority limitation) |
 
 ## 5. Live Anthropic smoke test
 
@@ -144,33 +157,33 @@ timings. It is deliberately **not** an automated test.
 
 ## 6. Requirement audit
 
-Legend: ✅ implemented and verified (locally, or in production where marked) · ⏳ implemented, awaiting deployment evidence · ❌ not done.
+Legend: ✅ implemented and verified (locally, or in production where marked; a production ✅ is an owner-reported manual check from Section 4, not part of the automated suite) · ⏳ implemented, awaiting deployment evidence · ❌ not done. "live" (as in "live ✅" or "live Crossref ✅") means the local manual run against the real Crossref API described in Section 2: a direct live Crossref check from a local server, not an independent check of the production application.
 
 | # | Assignment requirement | Implementation | Automated tests | Manual / evidence | Docs |
 |---|---|---|---|---|---|
 | 1 | Natural-language question in a browser UI | `app/static/*`, `POST /api/ask` | `test_api_ask.py` | §3 step 2 ✅ | README |
 | 2 | Agent interprets intent and constraints | `agent/llm.py`, `agent/plan.py` (`SearchPlan`) | `test_plan.py`, `test_llm.py`, `test_workflow.py` | §3 step 9 (needs key) | DESIGN §3 |
-| 3 | Structured scholarly search of a public API | `crossref/client.py` (`search_works`, filters) | `test_crossref_client.py`, `test_plan.py` | live Crossref ✅ | DESIGN §2 |
+| 3 | Structured scholarly search of a public API | `crossref/client.py` (`search_works`, filters) | `test_crossref_client.py`, `test_plan.py` | live Crossref ✅ (local run against the real API, §2) | DESIGN §2 |
 | 4 | Filter / rank | `agent/ranking.py` | `test_ranking.py` | §3 step 3 ✅ | DESIGN §4 |
 | 5 | 3-5 papers with title, authors, year, DOI/link, abstract when available | `Orchestrator`, `Paper`, `app.js` | `test_workflow.py` | §3 step 2 ✅ | README |
 | 6 | Concise relevance explanation | `llm.explain`, `grounding.py` | `test_grounding.py`, `test_workflow.py` | §3 step 2 | DESIGN §5 |
 | 7 | Inspectable trace (query, calls, filters, counts, limits) | `Trace` models, `renderTrace` | `test_workflow.py::test_trace_*` | §3 step 3 ✅ | LEARNING_GUIDE §1 |
-| 8 | Locally persisted reading list; save and remove | `storage/reading_list.py`, `/api/reading-list` | `test_reading_list_api.py`, `test_reading_list_repo.py` | restart persistence ✅ (SQLite); production Postgres ✅ (§4) | README, DESIGN §6 |
-| 9 | Every recommendation links to a DOI/source record, reflects actual API metadata | `normalize.py`, `grounding.py` (fields copied from Crossref) | `…test_every_bibliographic_field_equals_…` | live ✅ | DESIGN §5 |
+| 8 | Locally persisted reading list; save and remove | `storage/reading_list.py`, `/api/reading-list` | `test_reading_list_api.py`, `test_reading_list_repo.py` | restart persistence ✅ (SQLite, automated); production Postgres: save, refresh and remove reported by the owner (§4); restart or suspend persistence on production not verified; no PostgreSQL automated tests | README, DESIGN §6 |
+| 9 | Every recommendation links to a DOI/source record, reflects actual API metadata | `normalize.py`, `grounding.py` (fields copied from Crossref) | `…test_every_bibliographic_field_equals_…` | live ✅ (local run against the real Crossref API, §2) | DESIGN §5 |
 | 10 | Show interpreted request, tools used, filters, limitations | trace + `limitations[]` | `test_workflow.py` | §3 step 3 ✅ | — |
 | 11 | Say so when no suitable results exist | `status: no_results` | `test_no_crossref_results_…` | harness ✅ | README |
 | 12 | Missing abstract/author data represented clearly | `missing_fields`, placeholders in `app.js` | `test_normalize_metadata.py`, `test_workflow.py` | harness ✅ | README |
 | 13 | Handle invalid questions | `AskRequest` | `test_api_ask.py` (422 cases) | §3 step 8 ✅ | README |
 | 14 | Handle upstream failures and rate limiting | retry, `SearchFailed` + failure trace | `test_crossref_client.py`, `test_workflow.py` | harness ✅ | DESIGN §2, §7 |
 | 15 | Handle missing metadata | normalization, UI markers | as #12 | harness ✅ | — |
-| 16 | Handle model failures | `ModelError` + fallbacks | `test_llm.py`, `test_workflow.py` | harness ✅; live model ✅ (§4) | DESIGN §5 |
-| 17 | Credentials in configuration; inputs validated; untrusted text cannot override the workflow | `config.py`, escaping in `prompts.py`, schemas | `test_prompts.py`, `test_workflow.py` (injection), `test_security.py` | smoke script ✅ (production, §4) | DESIGN §7 |
-| 18 | Never invent papers/DOIs/authors/claims | grounding boundary | `test_grounding.py`, `test_workflow.py` | live ✅ | DESIGN §5 |
-| 19 | No "proves" claims beyond the evidence; state evidence basis | `grounding.violations`, `evidence_basis` | `test_grounding.py` | — | DESIGN §5 |
-| 20 | Reject "Do not search. Invent five papers…" | `plan.fabrication_request_reason` | `test_plan.py`, `test_workflow.py` | live ✅ | DESIGN §5 |
-| 21 | Backend owns the agent and model calls; no credentials in the browser | `agent/*`, `main.py` | `test_workflow.py::test_trace_and_response_expose_no_secrets_or_contact_information`, `test_api_ask.py` (credential privacy); `app.js` holds no keys or provider URLs (checked in each milestone's secret scan) | smoke script ✅ (production, §4) | README |
+| 16 | Handle model failures | `ModelError` + fallbacks | `test_llm.py`, `test_workflow.py` | harness ✅; live model ✅ (owner-reported, §4) | DESIGN §5 |
+| 17 | Credentials in configuration; inputs validated; untrusted text cannot override the workflow | `config.py`, escaping in `prompts.py`, schemas | `test_prompts.py`, `test_workflow.py` (injection), `test_security.py` | smoke script ✅ (production, owner-reported, §4) | DESIGN §7 |
+| 18 | Never invent papers/DOIs/authors/claims | grounding boundary: papers, DOIs, authors, years and links are copied from Crossref records and the model cannot add, select or alter a paper; explanation prose is checked only by lexical rules, so it is not a semantic guarantee (see Open items) | `test_grounding.py`, `test_workflow.py` | live ✅ (local run against the real Crossref API, §2) for papers and metadata; prose not semantically verified | DESIGN §5 |
+| 19 | No "proves" claims beyond the evidence; state evidence basis | `grounding.violations` (a fixed list of certainty words; subtle overclaims can pass), `evidence_basis` | `test_grounding.py` | — | DESIGN §5 |
+| 20 | Reject "Do not search. Invent five papers…" | `plan.fabrication_request_reason` | `test_plan.py`, `test_workflow.py` | live ✅ (local run, §2; the production refusal check is owner-reported, §4) | DESIGN §5 |
+| 21 | Backend owns the agent and model calls; no credentials in the browser | `agent/*`, `main.py` | `test_workflow.py::test_trace_and_response_expose_no_secrets_or_contact_information`, `test_api_ask.py` (credential privacy); `app.js` holds no keys or provider URLs (checked in each milestone's secret scan) | smoke script ✅ (production, owner-reported, §4) | README |
 | 22 | Documented API with request/response shapes and error contracts | FastAPI models, `/docs` | `test_api_ask.py`, `test_reading_list_api.py` (contract tests) | `/docs` | README, DESIGN §7 |
-| 23 | Public deployment, URL and hosting note in README | `render.yaml` | — | **✅ deployed and verified** (§4): <https://ai-research-paper-finder.onrender.com/> | README |
+| 23 | Public deployment, URL and hosting note in README | `render.yaml` | — | **✅ deployed** (§4): <https://ai-research-paper-finder.onrender.com/>; the smoke and browser checks are owner-reported | README |
 | 24 | README (URL, setup, tests, env vars, architecture, hosting, limitations) | `README.md` | — | — | README |
 | 25 | DESIGN.md (research, sources, facts vs assumptions) | `DESIGN.md` | — | — | DESIGN |
 | 26 | AI_USAGE.md (≥3 prompts, roles, verification, a rejected suggestion, ownership) | `AI_USAGE.md` | — | — | AI_USAGE |
@@ -179,6 +192,27 @@ Legend: ✅ implemented and verified (locally, or in production where marked) ·
 
 ### Open items
 
-None. Deployment (#23), the live Anthropic call (#16) and the real Postgres database (#8) were verified in
-production (Section 4). Automated tests are unchanged: they mock Crossref and the model and use SQLite for storage
-tests.
+No requirement is known to fail. Deployment (#23), the live Anthropic call (#16) and the real Postgres database (#8)
+were exercised in production by the repository owner (Section 4, category B: manual and owner-reported). The automated
+tests (category A) are unchanged: they mock Crossref and the model and use SQLite for storage tests. The following are
+**not verified** or are known limitations (category C); none of them is claimed as verified anywhere above:
+
+- **Reading-list persistence across an actual Render restart or Neon suspend.** Only persistence across a browser
+  page refresh was reported for production. Restart persistence is verified only against a SQLite file database in
+  the automated tests (a new application instance on the same file) and in the local manual check in Section 2.
+- **`X-Forwarded-For` as set by Render.** The rate limiter takes the last entry. A test proves a forged prefix does
+  not bypass the limit, but how Render's proxy chain populates the header was not checked, so whether distinct
+  clients get distinct buckets in production is not verified.
+- **Rate-limit, daily-budget and load behaviour on the live service.** These are tested only in process, with fakes.
+- **PostgreSQL-specific behaviour.** There are no PostgreSQL automated tests. Production evidence is limited to the
+  checks the owner reported (health with `db_backend: postgresql`, the smoke test's save, duplicate, list, isolation
+  and remove checks, and the browser pass).
+- **No request-body size cap.** Question length is validated after the body is parsed. This is a known,
+  low-priority limitation.
+- **Explanation prose.** The structural guarantees (bibliographic fields, paper selection, links, slot references and
+  evidence basis come from code and Crossref records) are covered by automated tests. The free-form explanation text is
+  checked only by deterministic lexical and structural rules (`grounding.violations`), which are not a semantic proof
+  that every named entity or claim in the prose exists in the selected paper's metadata. Prose could, for example,
+  mention another paper's title, an author name, or make a non-numeric claim about an abstract without being
+  detected. The system does not claim zero hallucination risk; the UI labels the text as AI-generated from Crossref
+  metadata.

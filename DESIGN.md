@@ -32,6 +32,7 @@ Crossref is the default source [F: assignment]. What we rely on:
   appears in a URL (and so not in `httpx` request logs, exception text, or traces). [A] Crossref's
   current page "strongly recommend[s]" the parameter, so identification by header alone could change;
   `trace.searches[].rate_limit.pool` shows the pool actually used.
+- **Identification and attribution.** Crossref needs no sign-up or key: the access options are public (no authentication or identification), polite (an email in the `mailto` parameter or the `User-Agent`; it affects rate limits and lets Crossref contact the client; recommended, not required) and Metadata Plus (an API key) [F: access-and-authentication page; etiquette section of the REST API docs]. This app always sends `User-Agent: paper-finder/0.1` and adds a `(mailto:…)` contact only if the optional `CROSSREF_MAILTO` is set; it is unset in production, so production currently sends no contact address and uses the public pool [D]. The cited pages describe how a client identifies itself, not a requirement to credit the returned metadata, and none is assumed [A]; the UI nonetheless labels bibliographic content, including abstracts, as coming from Crossref and links each paper to its `https://doi.org/` record.
 - **Behaviour on limits.** 429 → one retry after `Retry-After` (capped at 2 s), then a clear 503 with a
   trace [D]. Crossref's per-pool limits are recorded, not enforced client-side [A: demo-scale traffic].
 - **Data quality.** Abstracts are JATS XML and often absent; some may be copyrighted; author lists can
@@ -75,7 +76,7 @@ to slots we assigned, so the model cannot add, remove or alter a paper. **What i
 guaranteed:** the prose. Each explanation is rejected (and replaced by a deterministic sentence built from the
 paper's own metadata, recorded in the trace) if it has a link, DOI or citation, a certainty word ("proves",
 "demonstrates that", …), a content claim about a title-only paper, a number absent from the evidence, markup,
-or the wrong length. These checks are lexical and can miss subtle overclaims [limitation]. "Evidence
+or the wrong length. These checks are lexical and structural, not a semantic proof: they do not establish that every named entity or claim in free-form prose exists in the selected paper's metadata (prose could, for example, mention another paper's title, an author name, or make a non-numeric claim about an abstract without being detected) [limitation]. The system therefore grounds bibliographic identity and paper selection structurally but does not claim zero hallucination risk in explanation prose, which the UI labels as AI-generated from Crossref metadata. "Evidence
 basis" (title only vs title + abstract) is decided by code. An obvious request to invent papers is refused by a
 deterministic pre-check *before* any model or Crossref call; the model's `fabrication_request`
 classification is a second layer.
@@ -110,9 +111,9 @@ protect a public demo (limits in memory, per process).
 ## 8. Limitations
 
 Lexical relevance; metadata-only evidence; lexical prose checks; a deliberately narrow fabrication
-pre-check; in-memory limits; no automated browser tests. **Production verification:** the live Anthropic and
-Neon paths have been exercised in the deployed service, while the automated tests still mock the model and other
-external services and use SQLite for storage tests. The model is configuration: `claude-sonnet-5-5` by
+pre-check; in-memory limits; no automated browser tests; explanation prose is checked by lexical rules, not a semantic guarantee (section 5). **Production verification (owner-run):** the live Anthropic and
+Neon paths were exercised in the deployed service, while the automated tests still mock the model and other
+external services and use SQLite for storage tests (there are no PostgreSQL automated tests). **Not independently verified in production:** reading-list persistence across a Render restart or Neon suspend, Render's `X-Forwarded-For` behaviour, and rate-limit or load behaviour; there is no request-body size cap. The model is configuration: `claude-sonnet-5-5` by
 default for cost and latency [A: adequate quality at `low` effort]; `claude-opus-5-5` is a one-variable change.
 
 ## Sources

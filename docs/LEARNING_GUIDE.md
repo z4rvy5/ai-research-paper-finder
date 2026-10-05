@@ -16,8 +16,9 @@ workflow and its resilience:** one bounded Crossref retry, a per-client rate lim
 model-call cap (§1c), security headers, a consistent error shape, and a UI that shows every
 state. **Milestone 6 added the submission documents** (`README.md`, `DESIGN.md`, `AI_USAGE.md`,
 `VERIFICATION.md`), the Render Blueprint (`render.yaml`), a deployment smoke-test script, and a
-database-backend check in `/api/health` (§1d). The service has since been deployed to Render with Postgres and verified in
-production, including a live model call (see `VERIFICATION.md` §4); all automated tests still mock the model.
+database-backend check in `/api/health` (§1d). The service has since been deployed to Render with Postgres; the owner reported
+production checks, including a live model call, as manual verification (see `VERIFICATION.md` §4). All automated
+tests still mock the model.
 
 ---
 
@@ -323,7 +324,10 @@ that has any of: a length outside 15-600 characters; markup; a URL, DOI, `et al.
 `results show`, `found that`, …); or a number that isn't in the title, abstract or year. A
 rejected explanation is replaced by `fallback_explanation` (built only from the query terms
 found in the paper's own metadata) and recorded in `trace.grounding.explanation_rewrites`.
-These checks are lexical: they catch common overclaims but **can miss subtle ones**, so every
+These checks are lexical and structural, not a semantic proof that every named entity or claim in
+the prose exists in the paper's metadata: they catch common overclaims but **can miss subtle ones**
+(prose could, for example, mention another paper's title or an author name, or make a non-numeric
+claim about an abstract, undetected), and the system does not claim zero hallucination risk. So every
 explanation carries one compact badge beside the "Why it may be relevant" heading: `AI-generated ·
 Crossref metadata · title + abstract` (or `… · title only`) for model text, and `Built from Crossref
 metadata (no AI text) · title + abstract` (or `… · title only`) for the deterministic fallback. The
@@ -470,7 +474,7 @@ deterministic refusal of obvious requests to invent papers.
 - **Dates.** The year filter uses Crossref's `from-pub-date`/`until-pub-date`; the deterministic
   re-check uses `issued` (falling back to `published`). The two can disagree for papers published
   online before print.
-- **Abstracts.** Many Crossref records have none (4 of the 5 in the captured fixture), and the
+- **Abstracts.** Many Crossref records have none (none of the 5 in the captured fixture has one), and the
   ones that do are truncated to 1,500 characters and may be publisher-copyrighted.
 - **Crossref's pool limits are recorded, not enforced.** There is one bounded retry and a polite
   Retry-After pause, but no client-side pacing or per-pool limiter. At demo scale (a few
@@ -494,12 +498,14 @@ deterministic refusal of obvious requests to invent papers.
   smoke test. The tests deliberately never contact a database server.
 - **The recent-recommendations cache is per process.** After a restart (or on a second instance) a
   save falls back to a Crossref `/works/{doi}` lookup, which adds one request.
-- **Deployed and verified.** The Blueprint is live on Render at
-  <https://ai-research-paper-finder.onrender.com/> with a Postgres database; the production smoke test with `--expect-model
-  --expect-postgres` passed 22/22 checks and a manual browser check passed (recorded in
-  `VERIFICATION.md` §4).
-- **The live model is verified in production, not by the automated tests.** A real Anthropic call
-  has now been exercised successfully in the deployed service: `smoke_test.py <live-url>
-  --expect-model --expect-postgres` passed 22/22 checks, and a manual browser check used Claude
-  Sonnet 5.5 with no fallback. The automated tests still verify the prompts, structured-output
+- **Deployed; production checks are owner-reported.** The Blueprint is live on Render at
+  <https://ai-research-paper-finder.onrender.com/> with a Postgres database; the owner reported that the
+  production smoke test with `--expect-model --expect-postgres` passed 22/22 checks and that a manual
+  browser check passed (recorded in `VERIFICATION.md` §4). Not independently verified in production:
+  reading-list persistence across an actual Render restart or Neon suspend, Render's
+  `X-Forwarded-For` behaviour, and rate-limit or load behaviour. There is also no request-body size cap.
+- **The live model was exercised in production (owner-reported), not by the automated tests.** A real Anthropic call
+  has been exercised successfully in the deployed service, as reported by the owner: `smoke_test.py
+  <live-url> --expect-model --expect-postgres` passed 22/22 checks, and a manual browser check used
+  Claude Sonnet 5.5 with no fallback. The automated tests still verify the prompts, structured-output
   schemas and model failure handling only against mocks.

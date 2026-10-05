@@ -29,7 +29,7 @@ never from the model**, and application code, not the model, decides which paper
    year unknown), an evidence label ("title only" / "title + abstract"), limitations, and a trace:
    the interpreted request, the Crossref calls and filters, counts at each stage, what was removed
    or merged and why, which fallbacks were used.
-8. **Save.** A reading list, stored in Postgres, that survives server restarts.
+8. **Save.** A reading list, stored in a database (Postgres in production, SQLite locally), so that it is designed to survive server restarts. The restart behaviour is tested against a SQLite file in the automated tests; persistence across an actual restart of the production service was not independently verified (see Known limitations).
 
 If something fails, the app says so and keeps going where it can: with no model available it falls
 back to keyword search and metadata-only explanations; with Crossref down it shows a clear error
@@ -73,7 +73,7 @@ smoke test for a running deployment (`uv run python scripts/smoke_test.py <url>`
 | `ANTHROPIC_EFFORT` | no | `low` | `low` / `medium` / `high`; always sent explicitly because defaults differ by model. |
 | `CROSSREF_MAILTO` | no | none | Contact address for Crossref's "polite" pool. Sent **only** in the `User-Agent` header, never in URLs; if empty, no address is sent. |
 | `DATABASE_URL` | for production | `sqlite:///./data/app.db` | Reading-list database. Use Neon's `postgresql://…?sslmode=require` string as given. A blank value uses the default. |
-| `MAX_DAILY_MODEL_CALLS` | no | `500` | Cost cap per UTC day. After it, answers continue with fallbacks (`degraded`). `0` = never call the model. |
+| `MAX_DAILY_MODEL_CALLS` | no | `500` | Cost cap per UTC day. After it, answers continue with fallbacks (`degraded`). `0` = never call the model. `500` is the application default; the production Blueprint (`render.yaml`) sets `300`, so the live service uses 300. |
 | `ASK_RATE_LIMIT_PER_MINUTE` | no | `20` | Questions per client address per minute. `0` disables. |
 | `SAVE_RATE_LIMIT_PER_MINUTE` | no | `20` | Reading-list saves per client address per minute (a separate limit from questions). `0` disables. |
 | `MAX_SAVED_PER_CLIENT` | no | `200` | Most papers one `X-Client-Id` may keep saved. `0` disables. |
@@ -161,8 +161,10 @@ verified locally in a clean copy and have since run successfully on Render.
 
 To keep a public demo affordable: 20 questions and 20 reading-list saves per client address per
 minute (separate limits), at most 200 saved papers per `X-Client-Id`, and a daily cap on
-model calls (`MAX_DAILY_MODEL_CALLS`). After the cap, the app still answers using its deterministic
-fallbacks and marks the answer "degraded". Both limits are in memory and reset on restart.
+model calls (`MAX_DAILY_MODEL_CALLS`: the application default is 500 per UTC day, but the production
+deployment configured in `render.yaml` uses **300**; the other limits above are the defaults). After
+the cap, the app still answers using its deterministic fallbacks and marks the answer "degraded".
+These limits are in memory and reset on restart.
 
 ## Crossref notes
 
@@ -182,15 +184,26 @@ fallbacks and marks the answer "degraded". Both limits are in memory and reset o
 - **Relevance is lexical and limited to Crossref's metadata.** A relevant paper that uses different
   words can rank low, and explanations rest only on a title and (when present) an abstract; they are
   not a check of what a paper actually concludes.
-- **Explanation prose is checked, not guaranteed.** The checks are lexical and can miss subtle
-  overclaims; the UI labels AI text as such.
+- **Explanation prose is checked, not guaranteed.** The system structurally grounds bibliographic
+  identity and paper selection in Crossref-derived records: the model never supplies title, authors,
+  year, DOI or link and never chooses the papers. The free-form explanation text is additionally
+  checked by deterministic lexical and structural rules, but those checks are not a semantic proof
+  that every named entity or claim in the prose exists in the selected paper's metadata (for example,
+  prose could mention another paper's title or an author name, or make a non-numeric claim about an
+  abstract, without being detected). The system therefore does not claim zero hallucination risk; the
+  UI labels the text as AI-generated from Crossref metadata.
 - **The fabrication pre-check is deliberately narrow.** It recognises obvious instructions; a
-  paraphrase relies on the model's classification, and no fabricated paper can appear either way
-  because every paper comes from Crossref.
-- **Automated tests still mock the external boundaries.** The live Anthropic model and the real Neon
-  Postgres database have now been verified in production (smoke test and manual browser check, above),
-  but the automated test suite itself uses a mocked model and mocked Crossref, and SQLite instead of
-  Neon, so it does not exercise them.
+  paraphrase relies on the model's classification, and no fabricated paper can be recommended either
+  way because every recommended paper comes from a Crossref record.
+- **Automated tests still mock the external boundaries.** The owner reported verifying the live
+  Anthropic model and the real Neon Postgres database in production (smoke test and manual browser
+  check, above), but the automated test suite itself uses a mocked model and mocked Crossref, and
+  SQLite instead of Neon, so it does not exercise them. There are no PostgreSQL-specific automated
+  tests.
+- **Not independently verified in production:** reading-list persistence across an actual Render
+  restart or Neon suspend (only a page refresh was checked), Render's `X-Forwarded-For` behaviour, and
+  rate-limit or load behaviour on the live service. There is also no request-body size cap (question
+  length is validated after the body is parsed).
 - **Rate limits and the daily cap are per process and in memory.**
 - **No automated browser tests.** The UI is checked by static rules (`tests/test_security.py`) and the
   manual procedure.

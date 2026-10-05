@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status and commands
 
-Implemented milestones: Crossref search boundary, model-assisted workflow, persistent reading list, complete UX and resilience, and the submission documents (`README.md`, `DESIGN.md`, `AI_USAGE.md`, `VERIFICATION.md`). **Not yet done:** the public deployment (needs the owner's Render and Neon accounts), the live URL in the README, and a real Anthropic call (every automated test mocks the model). The stack is Python 3.12 (managed with `uv`), FastAPI, SQLAlchemy Core (SQLite locally, Neon Postgres in production), the Anthropic SDK, and a vanilla HTML/JS frontend in `app/static/`. Hosting is Render free tier with Neon Postgres (`render.yaml`). `assignment.pdf` is the source of truth for requirements.
+**Completed:** Crossref search boundary, model-assisted workflow, persistent reading list, complete UX and resilience, the submission documents (`README.md`, `DESIGN.md`, `AI_USAGE.md`, `VERIFICATION.md`), and the deployment to Render + Neon Postgres. **Current state:** the app is live at <https://ai-research-paper-finder.onrender.com/> and the README carries that URL. The owner reported production checks (a health check, `scripts/smoke_test.py` 22/22 with `--expect-model --expect-postgres`, and a manual browser pass that included a real Anthropic call); these are manual, owner-reported results recorded in `VERIFICATION.md` section 4, separate from the automated suite, which is entirely offline and mocks Crossref and the model (SQLite stands in for Postgres). **Open items / not independently verified:** reading-list persistence across an actual Render restart or Neon suspend, Render's `X-Forwarded-For` behaviour, rate-limit and load behaviour in production, and PostgreSQL-specific behaviour beyond the owner's checks (there are no PostgreSQL automated tests). Known limitations: no request-body size cap, and explanation prose is checked only by lexical rules (see `DESIGN.md` section 5). The stack is Python 3.12 (managed with `uv`), FastAPI, SQLAlchemy Core (SQLite locally, Neon Postgres in production), the Anthropic SDK, and a vanilla HTML/JS frontend in `app/static/`. Hosting is Render free tier with Neon Postgres (`render.yaml`). `assignment.pdf` is the source of truth for requirements.
 
 ```bash
 uv sync                                                   # install dependencies
@@ -30,7 +30,7 @@ To read the brief, run `pdftotext -layout assignment.pdf -`. The Read tool can't
 
 - **Contact address:** `CROSSREF_MAILTO` is optional and goes only in the `User-Agent` header, never in a URL, trace, error or log. Never use a person's account identity for it.
 - **No live services in automated tests.** Mock Crossref and the model; use SQLite. `scripts/smoke_test.py` and `scripts/capture_fixtures.py` are manual and live.
-- **Grounding:** never let model output become bibliographic metadata, a link, or the choice of papers.
+- **Grounding:** never let model output become bibliographic metadata, a link, or the choice of papers. Explanation prose is checked by lexical rules, not proven against the paper's metadata: never claim zero hallucination risk.
 - **Rendering:** the UI uses `textContent` only (a test enforces it, and enforces CSP compatibility). No `innerHTML`.
 - **Heredoc pitfall for editing:** shell heredocs can corrupt backslashes in regexes; use the Write/Edit tools for such files.
 

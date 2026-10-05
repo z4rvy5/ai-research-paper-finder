@@ -122,14 +122,65 @@ tests." *Why:* to let routine work proceed while keeping design decisions with t
    behaviour was right and the expectation wrong, so the *test* was corrected to assert the merge (and
    the merge is now documented as an example of real-data noise). Tests were not otherwise weakened.
 
+## Later phases: audit, hardening and documentation review
+
+After the milestones, deployment configuration and submission documents were in place, the same agent was used for
+review passes that were deliberately kept separate from implementation. Each pass was read-only until the developer
+decided what to change.
+
+1. **Final technical audit (read-only).** The agent was asked to audit, not fix: re-read the code, run the suite,
+   and report findings with severities and evidence. It found no critical issue. Findings included: the reading-list
+   save endpoint was neither rate limited nor capped (medium); a blank `DATABASE_URL` crashed startup; 500 responses
+   lacked the security headers; no request-body size cap; and a mutation check showed that removing the DOI-mismatch
+   check in the save path was not caught by any test.
+2. **The developer decided what to fix.** The developer approved specific findings and explicitly left others
+   alone: the save-limit and cap, blank-`DATABASE_URL`, 500-header and DOI-mismatch findings were approved; the
+   missing body-size cap was not approved and stayed a documented limitation; deployment and the real
+   `X-Forwarded-For` behaviour were assigned to the owner as post-deployment actions. The agent then made only the
+   approved changes: a separate rate-limit bucket for saves, a per-client cap of 200 saved papers, a blank
+   `DATABASE_URL` falling back to the default, the security headers on 500 responses, and a regression test for a
+   Crossref record whose DOI differs from the one requested. Each new protection was mutation-checked (disabled
+   in-process and confirmed to make a test fail) before the change was committed by the developer.
+3. **Production verification.** The owner deployed the service and ran the health check, the smoke test with
+   `--expect-model --expect-postgres`, and a manual browser pass. The agent only recorded those results in the
+   documents, labelled as owner-reported manual verification rather than automated tests. At the earlier stage the
+   live Anthropic smoke test was deferred; it was subsequently completed during this production verification.
+4. **Independent compliance audit against `assignment.pdf` (read-only).** The agent was told not to trust earlier
+   reports or the documentation, and to treat `assignment.pdf` as the source of truth. It re-ran the suite and the
+   network-blocked run, scanned the git history for secrets, applied in-process mutations, probed the grounding
+   checks with hand-written explanations, and compared the documents with the code. It found no failed requirement.
+   It did find: explanation prose could pass the lexical checks while naming another paper by title, an invented
+   author name, or an unsupported non-numeric claim about an abstract; stale statements in `CLAUDE.md`,
+   `VERIFICATION.md` ("Open items: None"), `docs/LEARNING_GUIDE.md` (an abstract count that did not match the
+   fixture) and the README (the daily model-call limit given as 500 although production uses 300); and that the
+   repository's visibility to reviewers could not be confirmed.
+5. **Targeted documentation hardening, then a documentation consistency review.** For the prose finding the
+   developer chose to document the limitation honestly (structural grounding of bibliographic fields and paper
+   selection, lexical and structural checks on prose, no claim of zero hallucination risk) instead of changing the
+   grounding behaviour or leaving a stronger claim in place. The stale statements were corrected, and unverified
+   production behaviour (restart persistence, `X-Forwarded-For`, rate-limit and load behaviour) was recorded as not
+   independently verified. A further read-only consistency review of all documents then found remaining stale
+   items, which were fixed in a last documentation-only pass.
+
+**How AI results were checked rather than accepted.** Audit findings were evidence-backed and classified (requirement
+gap, defect, documentation mismatch, limitation) and were not applied automatically: the developer reviewed them and
+approved or declined each. Fixes were limited to what was approved, required tests that fail when the protection is
+removed, and were re-verified with the full suite, lint, format check and the network-blocked run. Where an audit
+showed a claim was stronger than the implementation (the "Open items: None" line, the explanation-prose guarantee),
+the documentation was corrected instead of the claim being defended.
+
 ## Decisions the developer made
 
 The stack (Python, FastAPI, vanilla JS, SQLAlchemy Core) and hosting (Render + Neon, chosen over
 Fly.io with a paid volume and over Railway); Claude Sonnet 5.5 as the default model; Crossref as the
 only scholarly source; approval of deterministic orchestration instead of an autonomous agent; approval
 of the User-Agent-only contact address; the scope of the fabrication pre-check; a human-approval gate for design decisions; deferring the live
-Anthropic smoke test until access is available; that no co-author trailers are added to commits; and
-all git history, commit-metadata and GitHub privacy handling, which the agent was told not to touch.
+Anthropic smoke test until access was available (at that stage it was deferred; it was subsequently completed
+during the owner's production verification, see `VERIFICATION.md` section 4); that no co-author trailers are added
+to commits; which audit findings to fix, which to leave as documented limitations (such as the request-body size
+cap) and which to hand to the owner after deployment; the choice to document the explanation-prose limitation
+instead of claiming complete hallucination prevention; and all git history, commit-metadata and GitHub privacy
+handling, which the agent was told not to touch.
 
 ## Limits of this record
 
